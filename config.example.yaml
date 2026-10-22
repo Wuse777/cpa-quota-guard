@@ -1,0 +1,11 @@
+# Merge into the existing CPA config. Keep the rest of the configuration.
+# Compiled Linux amd64 artifact: dist/quota-guard.so
+plugins:
+  enabled: true
+  dir: /opt/cliproxyapi/plugins
+  configs:
+    quota-guard:
+      enabled: true
+      priority: 100
+      state_dir: /var/lib/cliproxyapi/quota-guard
+      proxy_url: ""  # Empty means direct; the installer inherits CPA requests.proxy-url.

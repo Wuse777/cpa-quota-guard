@@ -1,0 +1,21 @@
+cpa-quota-guard is an independent community plugin. It is not an official
+CLIProxyAPI, CPAMC, OpenAI, or Google project.
+
+The C ABI declarations and host callback adapter in abi.go are adapted from
+CLIProxyAPI v8.0.35, examples/plugin/host-callback-auth-files/go/main.go.
+Upstream: https://github.com/router-for-me/CLIProxyAPI
+The upstream MIT license and original copyright lines are preserved in
+licenses/CLIProxyAPI-MIT.txt.
+
+The UI typography, spacing, control states, and motion are adapted from
+Cli-Proxy-API-Management-Center v1.26.5.
+Upstream: https://github.com/router-for-me/Cli-Proxy-API-Management-Center
+Copyright (c) 2026 Router-For.ME. MIT license.
+See licenses/CPAMC-MIT.txt. The upstream management HTML is not redistributed.
+
+The compiled plugin includes gopkg.in/yaml.v3 v3.0.1.
+Its MIT and Apache license notices are in licenses/go-yaml-v3-LICENSE.txt,
+with the full Apache License 2.0 in licenses/Apache-2.0.txt.
+
+Python installation and test tools use PyYAML. PyYAML is not bundled in the
+compiled Go plugin. Its MIT license is in licenses/PyYAML-MIT.txt.

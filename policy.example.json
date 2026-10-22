@@ -1,0 +1,20 @@
+{
+  "revision": 1,
+  "mode": "observe",
+  "poll_seconds": 60,
+  "max_age_seconds": 180,
+  "timeout_seconds": 15,
+  "safety_percent": 3,
+  "resume_gap_percent": 5,
+  "unknown_action": "block",
+  "strategy": "round-robin",
+  "auto_reset": {"enabled": true, "before_hours": 6, "accounts": {}},
+  "rules": [
+    {
+      "account": "example-account.json",
+      "enabled": true,
+      "min_remaining_percent": 20,
+      "windows": {"primary": 20, "secondary": 30}
+    }
+  ]
+}

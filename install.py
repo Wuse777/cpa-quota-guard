@@ -19,7 +19,7 @@ import yaml
 
 from cpamc_bridge import inject_session_bridge
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 
 
 def atomic_write(path, data, mode=0o640, uid=None, gid=None):
@@ -76,6 +76,18 @@ def restore_panel(backup, info):
                      meta["mode"], meta["uid"], meta["gid"])
 
 
+def restore_management_key(backup, info):
+    if "management_key" not in info:
+        return
+    target = Path(info["management_key"])
+    if info["had_management_key"]:
+        meta = info["management_key_stat"]
+        atomic_write(target, (backup / "cpa-management.key").read_bytes(),
+                     meta["mode"], meta["uid"], meta["gid"])
+    elif target.exists():
+        target.unlink()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", type=Path, default=Path("/etc/cliproxyapi/config.yaml"))
@@ -103,6 +115,7 @@ def main():
                      st.st_uid, st.st_gid)
         restore_plugin(target, backup, info)
         restore_panel(backup, info)
+        restore_management_key(backup, info)
         restart(info.get("service", "cliproxyapi"))
         print("Rollback complete; saved quota policy remains in state_dir.")
         return
@@ -130,6 +143,9 @@ def main():
     if not args.state_dir.is_absolute():
         raise SystemExit("state_dir must be an absolute path")
     target = directory / "quota-guard.so"
+    management_key = args.state_dir / "cpa-management.key"
+    if management_key.is_symlink():
+        raise SystemExit("management key file must not be a symlink")
     panel_before = args.panel.read_bytes()
     panel_after = inject_session_bridge(panel_before)
     print(json.dumps({"config": str(args.config), "plugin": str(target),
@@ -168,16 +184,25 @@ def main():
     if had_plugin:
         old = target.stat()
         info["plugin_stat"] = {"mode": old.st_mode & 0o777, "uid": old.st_uid, "gid": old.st_gid}
+    info["management_key"] = str(management_key)
+    info["had_management_key"] = management_key.exists()
+    if management_key.exists():
+        old_key = management_key.stat()
+        info["management_key_stat"] = {"mode": old_key.st_mode & 0o777, "uid": old_key.st_uid, "gid": old_key.st_gid}
+        shutil.copy2(management_key, backup / "cpa-management.key")
     (backup / "manifest.json").write_text(json.dumps(info))
     plugins["enabled"] = True
     plugins["dir"] = str(directory)
     entry = plugins.setdefault("configs", {}).setdefault("quota-guard", {})
     proxy = args.proxy_url if args.proxy_url is not None else config.get("requests", {}).get("proxy-url", config.get("proxy-url", ""))
     entry.update(enabled=True, priority=100, state_dir=str(args.state_dir), proxy_url=proxy)
+    port = config.get("server", {}).get("port", config.get("port", 8317))
+    entry.update(management_url=f"http://127.0.0.1:{port}", management_key_file=str(management_key))
     config["plugins"] = plugins
     config.setdefault("management", {})["disable-auto-update-panel"] = True
     st = args.config.stat()
     try:
+        atomic_write(management_key, key.encode(), 0o600, account.pw_uid, account.pw_gid)
         atomic_write(target, artifact, 0o755)
         atomic_write(args.panel, panel_after, panel_stat.st_mode & 0o777, panel_stat.st_uid, panel_stat.st_gid)
         atomic_write(args.config, yaml.safe_dump(config, allow_unicode=True, sort_keys=False).encode(),
@@ -189,6 +214,7 @@ def main():
         atomic_write(args.config, (backup / "config.yaml").read_bytes(), st.st_mode & 0o777, st.st_uid, st.st_gid)
         restore_plugin(target, backup, info)
         restore_panel(backup, info)
+        restore_management_key(backup, info)
         subprocess.run(["systemctl", "restart", args.service], check=False)
         raise
     print("Installed. Backup:", backup)

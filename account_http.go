@@ -8,16 +8,24 @@ import (
 )
 
 // Account credentials are read afresh from CPA, never persisted by this plugin.
-func accountHTTP(host hostCall, cfg runtimeConfig, a account) (*http.Client, http.Header, map[string]any, error) {
+func accountCredentials(host hostCall, a account) (map[string]any, error) {
 	var auth struct {
 		JSON json.RawMessage `json:"json"`
 	}
 	if host == nil || host("host.auth.get", map[string]string{"auth_index": a.AuthIndex}, &auth) != nil {
-		return nil, nil, nil, errors.New("无法读取账号授权；请检查 CPA 授权状态")
+		return nil, errors.New("无法读取账号授权；请检查 CPA 授权状态")
 	}
 	var credentials map[string]any
 	if json.Unmarshal(auth.JSON, &credentials) != nil {
-		return nil, nil, nil, errors.New("账号授权格式无效")
+		return nil, errors.New("账号授权格式无效")
+	}
+	return credentials, nil
+}
+
+func accountHTTP(host hostCall, cfg runtimeConfig, a account) (*http.Client, http.Header, map[string]any, error) {
+	credentials, err := accountCredentials(host, a)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	token := stringAt(credentials, "access_token")
 	if token == "" {

@@ -35,6 +35,9 @@ func newEngine(cfg runtimeConfig, host hostCall) (*engine, error) {
 	if cfg.StateDir == "" {
 		cfg.StateDir = "/var/lib/cliproxyapi/quota-guard"
 	}
+	if cfg.ManagementURL == "" {
+		cfg.ManagementURL = "http://127.0.0.1:8317"
+	}
 	if err := validateRuntime(cfg); err != nil {
 		return nil, err
 	}

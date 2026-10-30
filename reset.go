@@ -1,17 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,34 +20,37 @@ type resetCredit struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 type resetAccountStatus struct {
-	Enabled   bool          `json:"enabled"`
-	Credits   []resetCredit `json:"credits"`
-	CheckedAt time.Time     `json:"checked_at,omitempty"`
-	AttemptAt time.Time     `json:"attempt_at,omitempty"`
-	NextAt    time.Time     `json:"next_at,omitempty"`
-	Message   string        `json:"message"`
-	Error     string        `json:"error,omitempty"`
+	Enabled    bool          `json:"enabled"`
+	Credits    []resetCredit `json:"credits"`
+	CheckedAt  time.Time     `json:"checked_at,omitempty"`
+	AttemptAt  time.Time     `json:"attempt_at,omitempty"`
+	NextAt     time.Time     `json:"next_at,omitempty"`
+	Message    string        `json:"message"`
+	Error      string        `json:"error,omitempty"`
+	LastResult *resetResult  `json:"last_result,omitempty"`
 }
 type resetOperation struct {
-	Account         string    `json:"account"`
-	Identity        string    `json:"identity"`
-	Target          string    `json:"target"`
-	ExpiresAt       time.Time `json:"expires_at"`
-	BeforeIDs       []string  `json:"before_ids"`
-	RequestID       string    `json:"request_id"`
-	State           string    `json:"state"`
-	Attempts        int       `json:"attempts"`
-	UpdatedAt       time.Time `json:"updated_at"`
-	NextTryAt       time.Time `json:"next_try_at,omitempty"`
-	Message         string    `json:"message"`
-	CooldownCleared bool      `json:"cooldown_cleared"`
+	Account         string       `json:"account"`
+	Identity        string       `json:"identity"`
+	Target          string       `json:"target"`
+	ExpiresAt       time.Time    `json:"expires_at"`
+	BeforeIDs       []string     `json:"before_ids"`
+	RequestID       string       `json:"request_id"`
+	State           string       `json:"state"`
+	Attempts        int          `json:"attempts"`
+	UpdatedAt       time.Time    `json:"updated_at"`
+	NextTryAt       time.Time    `json:"next_try_at,omitempty"`
+	Message         string       `json:"message"`
+	CooldownCleared bool         `json:"cooldown_cleared"`
+	LastResult      *resetResult `json:"last_result,omitempty"`
 }
 type resetEvent struct {
-	At      time.Time `json:"at"`
-	Account string    `json:"account"`
-	Credit  string    `json:"credit"`
-	State   string    `json:"state"`
-	Message string    `json:"message"`
+	At      time.Time    `json:"at"`
+	Account string       `json:"account"`
+	Credit  string       `json:"credit"`
+	State   string       `json:"state"`
+	Message string       `json:"message"`
+	Result  *resetResult `json:"result,omitempty"`
 }
 type resetJournal struct {
 	Version    int                       `json:"version"`
@@ -72,9 +70,13 @@ func loadResetJournal(dir string) (resetJournal, error) {
 	if json.Unmarshal(raw, &j) != nil || j.Version != 1 || j.Operations == nil {
 		return j, errors.New("重置卡执行记录无效；自动使用已暂停，额度保护继续运行")
 	}
-	for _, op := range j.Operations {
+	for key, op := range j.Operations {
 		if op.RequestID == "" || op.Identity == "" || op.Target == "" || op.ExpiresAt.IsZero() {
 			return j, errors.New("重置卡执行记录缺失关键字段；自动使用已暂停")
+		}
+		if op.LastResult == nil && op.Attempts > 0 && op.State != "success" && op.State != "confirmed" {
+			op.LastResult = &resetResult{At: op.UpdatedAt, Error: "历史兑换未确认成功；旧版本未保存 HTTP 状态及上游错误：" + op.Message}
+			j.Operations[key] = op
 		}
 	}
 	return j, nil
@@ -123,7 +125,7 @@ func (e *engine) commitReset(key string, op resetOperation, event bool) error {
 	op.UpdatedAt = time.Now()
 	e.resetJournal.Operations[key] = op
 	if event {
-		e.resetJournal.Events = append(e.resetJournal.Events, resetEvent{At: op.UpdatedAt, Account: op.Account, Credit: op.Target, State: op.State, Message: op.Message})
+		e.resetJournal.Events = append(e.resetJournal.Events, resetEvent{At: op.UpdatedAt, Account: op.Account, Credit: op.Target, State: op.State, Message: op.Message, Result: op.LastResult})
 		if len(e.resetJournal.Events) > 200 {
 			e.resetJournal.Events = e.resetJournal.Events[len(e.resetJournal.Events)-200:]
 		}
@@ -203,65 +205,6 @@ func parseResetCredits(raw []byte) ([]resetCredit, *int, error) {
 	return credits, applicable, nil
 }
 
-type resetAPI struct {
-	client   *http.Client
-	headers  http.Header
-	base     string
-	identity string
-}
-
-func newResetAPI(host hostCall, cfg runtimeConfig, a account) (*resetAPI, error) {
-	client, headers, credentials, err := accountHTTP(host, cfg, a)
-	if err != nil {
-		return nil, err
-	}
-	headers.Set("OpenAI-Beta", "codex-1")
-	headers.Set("Originator", "Codex Desktop")
-	base := "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
-	if cfg.TestProbeBase != "" {
-		base = cfg.TestProbeBase + "/codex-reset/" + url.PathEscape(a.Name)
-	}
-	identity := stringAt(credentials, "account_id")
-	if identity == "" {
-		identity = a.ID
-	}
-	if identity == "" {
-		identity = a.Name
-	}
-	sum := sha256.Sum256([]byte("codex\x00" + identity))
-	return &resetAPI{client: client, headers: headers, base: base, identity: hex.EncodeToString(sum[:])}, nil
-}
-func (api *resetAPI) call(ctx context.Context, method, path string, body any) ([]byte, int, error) {
-	var raw []byte
-	if body != nil {
-		raw, _ = json.Marshal(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, api.base+path, bytes.NewReader(raw))
-	if err != nil {
-		return nil, 0, errors.New("重置卡请求构建失败")
-	}
-	req.Header = api.headers.Clone()
-	response, err := api.client.Do(req)
-	if err != nil {
-		return nil, 0, errors.New("重置卡请求超时或网络异常")
-	}
-	defer response.Body.Close()
-	raw, err = io.ReadAll(io.LimitReader(response.Body, 2*1024*1024+1))
-	if err != nil || len(raw) > 2*1024*1024 {
-		return nil, response.StatusCode, errors.New("重置卡响应读取失败")
-	}
-	return raw, response.StatusCode, nil
-}
-func (api *resetAPI) list(ctx context.Context) ([]resetCredit, *int, error) {
-	raw, status, err := api.call(ctx, "GET", "", nil)
-	if err != nil {
-		return nil, nil, err
-	}
-	if status != 200 {
-		return nil, nil, fmt.Errorf("重置卡查询 HTTP %d；请检查账号授权和网络", status)
-	}
-	return parseResetCredits(raw)
-}
 func creditIDs(credits []resetCredit) []string {
 	ids := make([]string, 0, len(credits))
 	for _, c := range credits {
@@ -344,6 +287,20 @@ func (e *engine) processReset(ctx context.Context, a account) {
 		s.Error = e.resetJournalError
 		return
 	}
+	// A successful list query must not erase a failed redemption, including after restart.
+	s.LastResult = nil
+	for _, previous := range e.resetJournal.Operations {
+		if previous.Identity != api.identity {
+			continue
+		}
+		if previous.LastResult != nil && (s.LastResult == nil || previous.LastResult.At.After(s.LastResult.At)) {
+			copy := *previous.LastResult
+			s.LastResult = &copy
+		}
+	}
+	if s.LastResult != nil {
+		s.Error = s.LastResult.Error
+	}
 	var key string
 	var op resetOperation
 	// Resume an uncertain transaction before considering any other credit.
@@ -369,6 +326,10 @@ func (e *engine) processReset(ctx context.Context, a account) {
 	if key != "" {
 		if !op.ExpiresAt.After(now) {
 			op.State = "expired"
+			if op.LastResult == nil {
+				op.LastResult = &resetResult{At: now, Error: "目标卡已到期，历史兑换结果未确认"}
+			}
+			s.LastResult, s.Error = op.LastResult, op.LastResult.Error
 			op.Message = "目标卡已到期；停止重复提交"
 			_ = e.commitReset(key, op, true)
 			s.Message = op.Message
@@ -395,6 +356,8 @@ func (e *engine) processReset(ctx context.Context, a account) {
 		}
 		if !hasCredit(credits, op.Target) {
 			op.State = "success"
+			op.LastResult = &resetResult{At: now}
+			s.LastResult, s.Error = op.LastResult, ""
 			op.Message = "目标重置卡已不可用，已核实并结束兑换，不再重复提交"
 			if e.commitReset(key, op, true) != nil {
 				s.Error = e.resetJournalError
@@ -491,11 +454,10 @@ func (e *engine) processReset(ctx context.Context, a account) {
 	raw, httpStatus, consumeErr := api.call(consumeCtx, "POST", "/consume", map[string]string{"redeem_request_id": op.RequestID})
 	consumeCancel()
 	e.resetMu.Lock()
-	var response struct {
-		Code string `json:"code"`
-	}
-	_ = json.Unmarshal(raw, &response)
-	if consumeErr == nil && httpStatus >= 200 && httpStatus < 300 && (response.Code == "reset" || response.Code == "already_redeemed") {
+	result := api.result(raw, httpStatus, consumeErr)
+	op.LastResult = &result
+	s.LastResult, s.Error = &result, result.Error
+	if consumeErr == nil && httpStatus >= 200 && httpStatus < 300 && (result.Code == "reset" || result.Code == "already_redeemed") && result.Error == "" {
 		op.State = "confirmed"
 		op.Message = "上游已确认重置，正在核实卡片消耗"
 		op.NextTryAt = time.Time{}
@@ -509,11 +471,16 @@ func (e *engine) processReset(ctx context.Context, a account) {
 		return
 	}
 	// Only an explicit rejection proving no reset occurred permits a new UUID.
-	switch response.Code {
+	// Nested error codes describe failures but do not prove an idempotent request can be replaced.
+	var topLevel struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(raw, &topLevel)
+	switch topLevel.Code {
 	case "not_limited", "cooldown", "ineligible", "unavailable", "rate_limited", "no_available_credits":
 		if consumeErr == nil && httpStatus >= 200 && httpStatus < 500 && httpStatus != 408 {
 			op.State = "deferred"
-			op.Message = "上游暂未执行重置（" + response.Code + "），5 分钟后重新检查"
+			op.Message = "上游暂未执行重置（" + result.Code + "），5 分钟后重新检查"
 		}
 	}
 	if op.State == "pending" {
@@ -525,11 +492,6 @@ func (e *engine) processReset(ctx context.Context, a account) {
 	}
 	s.Message = op.Message
 	s.NextAt = op.NextTryAt
-	if consumeErr != nil {
-		s.Error = consumeErr.Error()
-	} else if httpStatus >= 300 {
-		s.Error = fmt.Sprintf("兑换接口 HTTP %d", httpStatus)
-	}
 }
 
 // resetMu is held. A confirmed reset clears only CPA's in-memory cooldown, never

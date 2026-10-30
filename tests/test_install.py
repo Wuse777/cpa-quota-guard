@@ -91,6 +91,13 @@ class InstallerTests(unittest.TestCase):
         current = yaml.safe_load(self.config.read_bytes())
         self.assertTrue(current["plugins"]["enabled"])
         self.assertEqual(current["plugins"]["configs"]["quota-guard"]["proxy_url"], "http://127.0.0.1:7890")
+        entry = current["plugins"]["configs"]["quota-guard"]
+        self.assertEqual(entry["management_url"], "http://127.0.0.1:18317")
+        saved_key = self.state / "cpa-management.key"
+        self.assertEqual(entry["management_key_file"], str(saved_key))
+        self.assertEqual(saved_key.read_text(), "fixture-key-only")
+        self.assertEqual(saved_key.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn("fixture-key-only", self.config.read_text())
         self.assertEqual(policy.read_text(), '{"fixture":"existing"}')
         self.assertEqual(self.panel.read_bytes(), b"patched-fixture")
         self.assertEqual(self.state.stat().st_mode & 0o777, 0o700)
@@ -102,6 +109,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.panel.read_bytes(), self.original_panel)
         self.assertFalse(self.target.exists())
         self.assertTrue(policy.exists())
+        self.assertFalse(saved_key.exists())
         self.assertEqual(rollback_calls.call_args_list[0].args[0], ["systemctl", "restart", "test-cpa"])
 
     def test_upgrade_rollback_restores_old_library_and_mode(self):
@@ -112,6 +120,26 @@ class InstallerTests(unittest.TestCase):
         self.run_main(["--rollback", str(backup)])
         self.assertEqual(self.target.read_bytes(), b"old-plugin")
         self.assertEqual(self.target.stat().st_mode & 0o777, 0o750)
+
+    def test_key_rotation_is_reverted_on_failed_upgrade_and_rollback(self):
+        self.state.mkdir()
+        saved_key = self.state / "cpa-management.key"
+        saved_key.write_text("previous-key")
+        saved_key.chmod(0o600)
+        with self.assertRaises(RuntimeError):
+            self.apply(verify_error=RuntimeError("fixture-registration-failed"))
+        self.assertEqual(saved_key.read_text(), "previous-key")
+        self.assertEqual(saved_key.stat().st_mode & 0o777, 0o600)
+
+    def test_management_key_symlink_is_rejected_before_mutation(self):
+        self.state.mkdir()
+        target = self.root / "external-key"
+        target.write_text("untouched")
+        (self.state / "cpa-management.key").symlink_to(target)
+        with self.assertRaises(SystemExit):
+            self.apply()
+        self.assertEqual(target.read_text(), "untouched")
+        self.assertEqual(self.config.read_bytes(), self.original)
 
     def test_failed_registration_automatically_restores_previous_files(self):
         self.target.write_bytes(b"old-plugin")

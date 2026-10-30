@@ -25,7 +25,7 @@ python3 tests/integration.py \
   --cpa /absolute/path/to/cli-proxy-api
 ```
 
-需要 Linux、PyYAML、OpenSSL 及空闲回环端口 18317–18319。测试使用虚构 OAuth 账号、本地额度 HTTP 服务和本地 TLS CONNECT 模型代理，不向真实上游发送模型请求。覆盖注册、认证、调度、窗口阈值、恢复、冲突、重启、临期自动兑换及持久化去重，共 22 项检查。
+需要 Linux、PyYAML、OpenSSL 及空闲回环端口 18317–18319。测试使用虚构 OAuth 账号、本地额度 HTTP 服务和本地 TLS CONNECT 模型代理，不向真实上游发送模型请求。覆盖注册、认证、调度、窗口阈值、恢复、冲突、重启、临期自动兑换及持久化去重，共 26 项检查（包含真实 CPA 转发、嵌套错误持久化、成功列表查询及重启后失败保留）。
 
 结果默认写入被 Git 忽略的 `test-results/integration-report.json`；可用 `--report` 指定路径。测试目录保留在系统临时目录，便于本机诊断，不要将运行结果直接加入仓库。
 
@@ -79,3 +79,5 @@ python3 scripts/package_release.py
 ```
 
 生成安装归档、外部 SHA256SUMS 和包内逐文件清单。`dist/` 与 `release/` 不提交到 Git。手工发布前核对安装、回滚、兼容性和文档；GitHub CI 只生成 Actions artifact，不自动公开 Release 或更改服务器。
+
+0.2.2 本轮本地 Linux 构建使用 Go 1.23.12，执行 Go race / vet、15 项 Python 单元测试、11 项 Node 会话测试、26 项真实 CPA 隔离检查及 3 项 systemd 安装回滚检查。真实卡片未用于提前兑换测试。

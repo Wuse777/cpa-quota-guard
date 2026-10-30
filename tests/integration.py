@@ -38,6 +38,7 @@ failures = set()
 model_calls = []
 reset_cards = {}
 reset_calls = []
+reset_failure = False
 
 
 class Probe(http.server.BaseHTTPRequestHandler):
@@ -72,6 +73,12 @@ class Probe(http.server.BaseHTTPRequestHandler):
             name = self.path.split("/")[-2]
             payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
             reset_calls.append((name, payload["redeem_request_id"]))
+            if reset_failure:
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":{"code":"policy_denied","message":"fixture reset rejected"}}')
+                return
             cards = reset_cards.get(name, [])
             if cards:
                 cards.pop(0)
@@ -185,6 +192,7 @@ def generate(model, stream=False):
 
 
 def main():
+    global reset_failure
     parser = argparse.ArgumentParser()
     parser.add_argument("--plugin", required=True)
     parser.add_argument("--cpa", default="/opt/cliproxyapi/cli-proxy-api")
@@ -223,7 +231,10 @@ def main():
               "requests": {"proxy-url": "http://127.0.0.1:18319", "request-retry": 0},
               "plugins": {"enabled": True, "dir": str(plugin_dir), "configs": {"quota-guard": {
                   "enabled": True, "priority": 100, "state_dir": str(work / "state"),
+                  "management_url": BASE, "management_key_file": str(work / "management.key"),
                   "test_probe_base": "http://127.0.0.1:18318"}}}}
+    (work / "management.key").write_text(KEY)
+    (work / "management.key").chmod(0o600)
     config_path = work / "config.yaml"
     config_path.write_text(yaml.safe_dump(config))
     probe_server = http.server.ThreadingHTTPServer(("127.0.0.1", 18318), Probe)
@@ -250,7 +261,7 @@ def main():
     try:
         proc = start()
         s = wait_for(lambda s: len(s["accounts"]) == 3 and all(a["buckets"] for a in s["accounts"]))
-        check("native plugin registration and background queries", s["version"] == "0.2.1")
+        check("native plugin registration and background queries", s["version"] == "0.2.2")
         plugins = api("/v8/management/plugins")[1]
         check("CPAMC plugin metadata and menu", any(p.get("id") == "quota-guard" and p.get("menus") for p in plugins["plugins"]))
         check("anonymous status rejected", api(PREFIX + "/status", key="")[0] == 401)
@@ -330,6 +341,10 @@ def main():
         refresh()
         s = wait_for(lambda s: any(e["state"] == "success" for e in s["reset_events"]))
         check("server automatically redeems due card without an open panel", len(reset_calls) == 1 and reset_calls[0][0] == "a.json")
+        check("redemption uses CPA management forwarding and persists upstream status",
+              "/v8/management/requests/api-call" in (work / "cpa.log").read_text()
+              and any(e.get("result", {}).get("management_status") == 200
+                      and e.get("result", {}).get("http_status") == 200 for e in s["reset_events"]))
         check("future cards and disabled account are preserved", len(reset_cards["a.json"]) == 1 and len(reset_cards["b.json"]) == 1)
         s = wait_for(lambda s: any(a["account"]["name"] == "a.json" and not a["would_block"] for a in s["accounts"]))
         generate(model)
@@ -339,6 +354,23 @@ def main():
         proc = start()
         s = wait_for(lambda s: len(s["accounts"]) == 3 and all(a["buckets"] for a in s["accounts"]))
         check("durable reset journal prevents redemption after restart", len(reset_calls) == 1 and any(e["state"] == "success" for e in s["reset_events"]))
+        reset_failure = True
+        reset_cards["a.json"].insert(0, card("rejected-card", 3))
+        refresh()
+        def reset_account(snapshot):
+            return next(a for a in snapshot["accounts"] if a["account"]["name"] == "a.json")["reset"]
+        s = wait_for(lambda s: reset_account(s).get("last_result", {}).get("code") == "policy_denied")
+        check("real CPA forwards and journals nested upstream errors",
+              reset_account(s)["last_result"]["http_status"] == 403
+              and "fixture reset rejected" in reset_account(s)["error"])
+        refresh()
+        s = wait_for(lambda s: "fixture reset rejected" in reset_account(s).get("error", ""))
+        check("successful card list does not clear failed redemption", reset_account(s)["error"] != "")
+        proc.terminate()
+        proc.wait(timeout=15)
+        proc = start()
+        s = wait_for(lambda s: any(a.get("reset", {}).get("last_result", {}).get("code") == "policy_denied" for a in s["accounts"]))
+        check("redemption failure survives real CPA restart", reset_account(s)["last_result"]["http_status"] == 403)
         # Leave a safe observation fixture for the browser acceptance test.
         p = status()["policy"]
         p["mode"] = "observe"

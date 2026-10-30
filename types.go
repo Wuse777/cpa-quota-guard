@@ -8,13 +8,15 @@ import (
 )
 
 const pluginID = "quota-guard"
-const version = "0.2.1"
+const version = "0.2.2"
 
 type hostCall func(string, any, any) error
 
 type runtimeConfig struct {
-	StateDir string `yaml:"state_dir"`
-	ProxyURL string `yaml:"proxy_url"`
+	StateDir          string `yaml:"state_dir"`
+	ProxyURL          string `yaml:"proxy_url"`
+	ManagementURL     string `yaml:"management_url"`
+	ManagementKeyFile string `yaml:"management_key_file"`
 	// Used only by the isolated integration harness; restricted to loopback HTTP.
 	TestProbeBase string `yaml:"test_probe_base"`
 }

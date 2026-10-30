@@ -50,6 +50,10 @@ sudo python3 install.py --apply --management-key-file /root/cpa-management.key
 
 默认从 CPA 的 `requests.proxy-url` 继承查询代理；`--proxy-url direct` 可直连，或指定你自己的 HTTP / HTTPS / SOCKS5 代理。账号自身的代理优先。
 
+自 0.2.2 起，后台复用 CPA 管理接口执行重置。安装器会将实际管理密钥写入状态目录的 `cpa-management.key`，仅服务用户可读（0600），并保存该文件的升级前版本以供失败恢复或回滚。密钥不会写入 YAML、策略或状态响应。轮换 CPA 管理密钥后需同步更新此文件，或重新运行安装器。
+
+**从 0.2.1 升级不能只替换 `.so` 文件**：请运行新版安装器配置管理地址和私有密钥文件；否则自动查询和兑换会显示配置错误，额度保护继续运行。策略和去重 journal 保留。
+
 ## 自定义布局
 
 ```bash
@@ -85,4 +89,4 @@ sudo python3 install.py --apply \
 sudo python3 install.py --rollback /root/cliproxyapi-plugin-backups/quota-guard-替换为实际备份目录
 ```
 
-回滚恢复配置、共享库和 CPAMC HTML，保留状态目录。宿主重启期间请求可能短暂不可用。回滚旧代码前确认其能够读取当前状态格式；本安装器的回滚并非状态格式迁移工具。
+回滚恢复配置、共享库、CPAMC HTML 和升级前的插件管理密钥文件，保留策略及 journal。宿主重启期间请求可能短暂不可用。回滚旧代码前确认其能够读取当前状态格式；本安装器的回滚并非状态格式迁移工具。

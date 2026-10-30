@@ -37,8 +37,8 @@
 
 ```bash
 sha256sum -c SHA256SUMS
-tar -xzf cpa-quota-guard_0.2.1_linux_amd64.tar.gz
-cd cpa-quota-guard-0.2.1
+tar -xzf cpa-quota-guard_0.2.2_linux_amd64.tar.gz
+cd cpa-quota-guard-0.2.2
 sha256sum -c dist/SHA256SUMS
 
 # 安装器需要 Python 的 yaml 模块；Debian / Ubuntu 可使用发行版软件包。
@@ -57,6 +57,8 @@ sudo python3 install.py --apply --management-key-file /root/cpa-management.key
 打开 CPAMC，登录后进入侧栏 **账号额度保护**：查看额度，设置账号或窗口阈值，再保存策略。无需再次输入管理密钥。
 
 **首次启动默认：额度保护为“只观察”，自动使用重置卡开启、提前 6 小时。** 两者相互独立；观察模式不会暂停自动兑换。若不希望自动使用，应在安装前预设关闭策略，或在页面策略设置中关闭总开关；首次安装前关闭的方法见安装文档。
+
+0.2.2 的卡片查询与兑换通过 CPA 管理接口转发，与 CPAMC 手动重置共用调用路径。升级请运行新版安装器，配置本机管理地址及 0600 私有密钥文件；仅替换共享库不足以启用此调用方式。执行记录保留脱敏失败详情，列表查询成功和重启不会清除最近兑换错误。
 
 ## 行为与限制
 

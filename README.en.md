@@ -30,8 +30,8 @@ Download the archive and `SHA256SUMS` from this repository's Releases:
 
 ```bash
 sha256sum -c SHA256SUMS
-tar -xzf cpa-quota-guard_0.2.1_linux_amd64.tar.gz
-cd cpa-quota-guard-0.2.1
+tar -xzf cpa-quota-guard_0.2.2_linux_amd64.tar.gz
+cd cpa-quota-guard-0.2.2
 sha256sum -c dist/SHA256SUMS
 python3 install.py  # read-only plan
 sudo python3 install.py --apply --management-key-file /root/cpa-management.key
@@ -58,3 +58,7 @@ bash build.sh
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/TESTING.md](docs/TESTING.md). Unit and isolated integration tests use fake accounts; production credentials, logs, and runtime state are not part of this repository.
 
 MIT license; upstream and dependency notices are preserved in [NOTICE](NOTICE) and [licenses/](licenses/). Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+
+## Reset forwarding in 0.2.2
+
+Card queries and redemption use CPA's loopback `/v8/management/requests/api-call`, the same endpoint used by CPAMC's manual reset. CPA resolves the account token. Run the new installer when upgrading: it provisions the loopback management URL and a service-owned 0600 management key file. Replacing only the shared library is insufficient. Failures retain CPA/upstream HTTP status, structured codes and sanitized summaries across successful list queries and restarts; confirmed redemption clears the current error while preserving event history. See the installation and configuration guides for key rotation and rollback.

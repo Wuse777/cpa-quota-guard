@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,13 +16,15 @@ import (
 )
 
 type resetFixture struct {
-	mu           sync.Mutex
-	credits      []resetCredit
-	requests     []string
-	consumed     map[string]bool
-	mode         string
-	cooldowns    int
-	failCooldown bool
+	mu              sync.Mutex
+	credits         []resetCredit
+	requests        []string
+	consumed        map[string]bool
+	mode            string
+	cooldowns       int
+	managementCalls []string
+	managementMode  string
+	failCooldown    bool
 }
 
 func resetTestEngine(t *testing.T) (*engine, *resetFixture, account) {
@@ -31,6 +34,63 @@ func resetTestEngine(t *testing.T) (*engine, *resetFixture, account) {
 		{ID: "far", Status: "available", ExpiresAt: time.Now().Add(8 * 24 * time.Hour)},
 	}, consumed: map[string]bool{}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v8/management/requests/api-call" {
+			if r.Method != "POST" || r.Header.Get("Authorization") != "Bearer management-fixture-secret" {
+				t.Error("missing CPA management authentication")
+			}
+			var request struct {
+				AuthIndex string            `json:"authIndex"`
+				Method    string            `json:"method"`
+				URL       string            `json:"url"`
+				Header    map[string]string `json:"header"`
+				Data      string            `json:"data"`
+				Proxy     string            `json:"proxy_url"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Error(err)
+				return
+			}
+			if request.AuthIndex != "index" || request.Header["Authorization"] != "Bearer $TOKEN$" || request.Proxy != "direct" {
+				t.Errorf("CPA request must use auth index, token placeholder and selected proxy: %#v", request)
+			}
+			if request.Method == "POST" && (request.Header["OpenAI-Beta"] != "" || request.Header["Originator"] != "") {
+				t.Error("consume must match CPAMC manual reset headers")
+			}
+			f.mu.Lock()
+			f.managementCalls = append(f.managementCalls, request.Method)
+			mode := ""
+			if request.Method == "POST" {
+				mode = f.managementMode
+			}
+			f.mu.Unlock()
+			if mode == "forbidden" {
+				w.WriteHeader(403)
+				fmt.Fprint(w, `{"error":"management access denied"}`)
+				return
+			}
+			if mode == "malformed" {
+				fmt.Fprint(w, `{"status_code":200}`)
+				return
+			}
+			upstream, err := http.NewRequestWithContext(r.Context(), request.Method, request.URL, strings.NewReader(request.Data))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			for k, v := range request.Header {
+				upstream.Header.Set(k, strings.ReplaceAll(v, "$TOKEN$", "fake-token"))
+			}
+			response, err := http.DefaultClient.Do(upstream)
+			if err != nil {
+				t.Error(err)
+				w.WriteHeader(502)
+				return
+			}
+			defer response.Body.Close()
+			body, _ := io.ReadAll(response.Body)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status_code": response.StatusCode, "body": string(body)})
+			return
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if r.Header.Get("Authorization") != "Bearer fake-token" {
@@ -58,6 +118,19 @@ func resetTestEngine(t *testing.T) (*engine, *resetFixture, account) {
 		if f.mode == "deferred" {
 			w.WriteHeader(409)
 			fmt.Fprint(w, `{"code":"not_limited"}`)
+			return
+		}
+		if f.mode == "nested-error" {
+			w.WriteHeader(403)
+			fmt.Fprint(w, `{"error":{"code":"policy_denied","message":"denied fake-token management-fixture-secret Bearer other-secret"}}`)
+			return
+		}
+		if f.mode == "bad-json" {
+			fmt.Fprint(w, `<html>fake-token</html>`)
+			return
+		}
+		if f.mode == "unknown-code" {
+			fmt.Fprint(w, `{"code":"new_failure","message":"try later"}`)
 			return
 		}
 		if f.mode == "ambiguous" {
@@ -99,7 +172,12 @@ func resetTestEngine(t *testing.T) (*engine, *resetFixture, account) {
 		}
 		return json.Unmarshal([]byte(raw), dest)
 	}
-	e, err := newEngine(runtimeConfig{StateDir: t.TempDir(), TestProbeBase: server.URL}, host)
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "management.key")
+	if err := os.WriteFile(keyFile, []byte("management-fixture-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e, err := newEngine(runtimeConfig{StateDir: dir, TestProbeBase: server.URL, ManagementURL: server.URL, ManagementKeyFile: keyFile}, host)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +441,7 @@ func TestReconfigureReadsJournalAfterRetiringWorkerFinishes(t *testing.T) {
 		old.processReset(context.Background(), a)
 		close(old.done)
 	}()
-	config := fmt.Sprintf("state_dir: %s\ntest_probe_base: %s\n", old.cfg.StateDir, old.cfg.TestProbeBase)
+	config := fmt.Sprintf("state_dir: %s\ntest_probe_base: %s\nmanagement_url: %s\nmanagement_key_file: %s\n", old.cfg.StateDir, old.cfg.TestProbeBase, old.cfg.ManagementURL, old.cfg.ManagementKeyFile)
 	raw, _ := json.Marshal(map[string]any{"config_yaml": []byte(config)})
 	if err := configure(raw); err != nil {
 		t.Fatal(err)

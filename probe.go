@@ -17,6 +17,12 @@ import (
 )
 
 func validateRuntime(c runtimeConfig) error {
+	if c.ManagementURL != "" {
+		u, err := url.Parse(c.ManagementURL)
+		if err != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" || net.ParseIP(u.Hostname()) == nil || !net.ParseIP(u.Hostname()).IsLoopback() {
+			return errors.New("management_url 仅允许无路径的回环 HTTP 地址")
+		}
+	}
 	if c.ProxyURL != "" && c.ProxyURL != "direct" {
 		u, err := url.Parse(c.ProxyURL)
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" && u.Scheme != "socks5h") {

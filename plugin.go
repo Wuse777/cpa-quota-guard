@@ -65,6 +65,8 @@ func registration() any {
 		"ConfigFields": []any{
 			map[string]any{"Name": "state_dir", "Type": "string", "Description": "策略文件目录；CPA 服务用户必须有写入权限。默认 /var/lib/cliproxyapi/quota-guard"},
 			map[string]any{"Name": "proxy_url", "Type": "string", "Description": "额度查询代理，例如 http://127.0.0.1:7890；空值直连，账号自带代理优先"},
+			map[string]any{"Name": "management_url", "Type": "string", "Description": "CPA 本机管理地址，仅允许回环 HTTP；默认 http://127.0.0.1:8317"},
+			map[string]any{"Name": "management_key_file", "Type": "string", "Description": "CPA 管理密钥私有文件；安装器以 0600 权限配置，不在策略或状态中返回"},
 		},
 	}, "capabilities": map[string]bool{"scheduler": true, "scheduler_across_priorities": true, "management_api": true}}
 }

@@ -88,7 +88,7 @@ def main():
                "--service-user", "root", "--management-key-file", str(work / "key")]
         run(*cmd, "--apply")
         status = get("/v0/management/plugins/quota-guard/status")
-        assert status["version"] == "0.2.1" and status["policy"]["mode"] == "observe"
+        assert status["version"] == "0.2.2" and status["policy"]["mode"] == "observe"
         assert status["accounts"] == []
         checks.append("installer copies real shared library, restarts isolated unit and verifies registration")
         # Persist a policy through the real plugin so rollback can prove it remains intact.

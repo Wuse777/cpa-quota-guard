@@ -112,10 +112,11 @@
     document.querySelectorAll('[data-field]').forEach(input => { input.value = draft[input.dataset.field]; });
     const scheduled = accounts.filter(a => a.reset?.enabled && !a.account.disabled && !a.reset.error && validDate(a.reset.next_at) && a.reset.credits?.some(c => Date.parse(c.expires_at) > Date.now())).sort((a,b) => Date.parse(a.reset.next_at) - Date.parse(b.reset.next_at));
     const next = scheduled[0];
+    const failed = accounts.filter(a => a.reset?.enabled && a.reset.error);
     $('next-title').textContent = next ? '下一张临期卡，已安排自动使用' : policy.auto_reset.enabled ? '后台持续检查重置卡' : '自动使用已关闭';
     $('next-description').textContent = next ? `${next.account.name} · ${next.reset.message}。关闭面板仍会运行。` : '在策略设置中管理总开关，在账号卡片中单独启用或关闭。';
-    $('next-state').textContent = state.reset_error ? '自动使用已暂停' : next ? '已安排' : policy.auto_reset.enabled ? '检查中' : '未启用';
-    $('next-state').className = 'badge' + (state.reset_error ? ' warn' : next ? ' good' : '');
+    $('next-state').textContent = state.reset_error ? '自动使用已暂停' : failed.length ? '兑换异常' : next ? '已安排' : policy.auto_reset.enabled ? '检查中' : '未启用';
+    $('next-state').className = 'badge' + (state.reset_error || failed.length ? ' warn' : next ? ' good' : '');
     $('next-countdown').textContent = next ? remaining(next.reset.next_at) : '—';
     if (next) $('next-countdown').dataset.countdown = next.reset.next_at; else delete $('next-countdown').dataset.countdown;
     $('next-date').textContent = next ? `计划时间 ${date(next.reset.next_at)}` : '按浏览器本地时区显示时间';
@@ -138,7 +139,7 @@
     const events = state.reset_events || [];
     $('event-count').textContent = events.length;
     const labels = {pending:'等待核实',confirmed:'重置已确认',success:'核实完成',deferred:'延后重试',expired:'目标卡已到期',mismatch:'账号已暂停'};
-    markup($('events'), events.length ? [...events].reverse().map(e => `<div class="event"><time>${esc(date(e.at))}</time><div class="event-account">${esc(e.account)}</div><div><span class="badge ${['success','confirmed'].includes(e.state) ? 'good' : ['mismatch','expired'].includes(e.state) ? 'warn' : ''}">${esc(labels[e.state] || e.state)}</span><p>${esc(e.message)}</p></div></div>`).join('') : '<div class="empty-inline">暂无执行记录。进入提前使用窗口后，后台会在这里记录结果。</div>');
+    markup($('events'), events.length ? [...events].reverse().map(e => `<div class="event"><time>${esc(date(e.at))}</time><div class="event-account">${esc(e.account)}</div><div><span class="badge ${['success','confirmed'].includes(e.state) ? 'good' : ['mismatch','expired'].includes(e.state) ? 'warn' : ''}">${esc(labels[e.state] || e.state)}</span><p>${esc(e.message)}</p>${e.result ? `<p class="account-note ${e.result.error ? 'error' : ''}">${esc([e.result.management_status ? `CPA HTTP ${e.result.management_status}` : '', e.result.http_status ? `上游 HTTP ${e.result.http_status}` : '', e.result.code || '', e.result.error || ''].filter(Boolean).join(' · '))}</p>` : ''}</div></div>`).join('') : '<div class="empty-inline">暂无执行记录。进入提前使用窗口后，后台会在这里记录结果。</div>');
     if (state.reset_error || state.refresh_error) message(state.reset_error || state.refresh_error, true);
   }
   async function load(discardDraft = false) {

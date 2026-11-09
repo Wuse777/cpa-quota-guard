@@ -63,7 +63,7 @@ jobs:
           trap 'kill "$fixture_pid" 2>/dev/null || true' EXIT
           fixture_ready=false
           for attempt in $(seq 1 240); do
-            if rg --quiet BROWSER_FIXTURE_READY test-results/browser-fixture.log && curl --fail --silent http://127.0.0.1:18317/management.html > /dev/null; then fixture_ready=true; break; fi
+            if grep -q BROWSER_FIXTURE_READY test-results/browser-fixture.log && curl --fail --silent http://127.0.0.1:18317/management.html > /dev/null; then fixture_ready=true; break; fi
             if ! kill -0 "$fixture_pid" 2>/dev/null; then cat test-results/browser-fixture.log; exit 1; fi
             sleep 1
           done

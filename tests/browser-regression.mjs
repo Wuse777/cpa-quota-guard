@@ -72,7 +72,7 @@ try {
  assert.deepEqual(errors,[],'browser console page errors');
  if(arg('--url')) {
    assert.ok(['127.0.0.1','localhost','[::1]'].includes(new URL(arg('--url')).hostname),'The write-enabled CPA smoke accepts only a loopback isolated fixture URL');
-   const live=await browser.newPage({viewport:{width:1280,height:900},reducedMotion:'reduce'}),liveErrors=[];live.on('pageerror',e=>liveErrors.push(e.message));await live.goto(arg('--url'));
+   const live=await browser.newPage({viewport:{width:1280,height:900},reducedMotion:'reduce'}),liveErrors=[];live.on('pageerror',e=>liveErrors.push(e.message));await live.goto(arg('--url'),{waitUntil:'domcontentloaded'});
    const iframe=()=>live.locator('iframe[src*="quota-guard"]');
    await live.locator('input[type="password"], iframe[src*="quota-guard"], a[href*="quota-guard"]').first().waitFor({state:'attached'});
    if(!await iframe().count()){

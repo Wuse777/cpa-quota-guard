@@ -1,42 +1,39 @@
 # 安装、升级与回滚
 
-## 前提
-
-- 已运行兼容的 CPA / CPAMC，详见 [COMPATIBILITY.md](COMPATIBILITY.md)。
-- Linux 主机、systemd、Python 3 与 PyYAML，拥有 root 权限。
-- 默认目录为 `/opt/cliproxyapi`，服务及用户为 `cliproxyapi`。
-- 预编译安装包从本仓库 Releases 获取；源码构建使用 `bash build.sh`。
-
-Debian / Ubuntu 的 Python 依赖可使用 `sudo apt-get install python3-yaml`。开发虚拟环境也可用 `python3 -m pip install -r requirements.txt`；用 sudo 运行安装器时，需确保所选 Python 能导入 `yaml`。
-
-## 首次自动兑换设置
-
-默认策略的额度保护为观察模式，但**自动使用重置卡默认开启、提前 6 小时**，保存策略或关闭浏览器不会改变后台独立运行的性质。
-
-若希望在第一次启动前关闭自动兑换，仅在新的策略目录中预置安全启动策略：
+需要兼容的 CPA 8.0.35 / CPAMC 1.26.5、Linux amd64/glibc、systemd、Python 3 与 PyYAML。默认服务和用户为 `cliproxyapi`。先从 Releases 下载 0.3.0 安装包及外部 `SHA256SUMS`：
 
 ```bash
-# 下列路径应与 --state-dir 保持一致；升级时不要覆盖原策略。
-sudo install -d -o cliproxyapi -g cliproxyapi -m 700 /var/lib/cliproxyapi/quota-guard
-if sudo test -e /var/lib/cliproxyapi/quota-guard/policy.json; then
-  echo '已有策略，保留原文件；请在 CPAMC 中检查自动使用开关。'
-else
-  sudo install -o cliproxyapi -g cliproxyapi -m 600 policy.safe-start.example.json \
-    /var/lib/cliproxyapi/quota-guard/policy.json
-fi
+sha256sum -c SHA256SUMS
+tar -xzf cpa-quota-guard_0.3.0_linux_amd64.tar.gz
+cd cpa-quota-guard-0.3.0
+sha256sum -c dist/SHA256SUMS
+sudo apt-get install python3-yaml
+python3 install.py --doctor
+python3 install.py  # 只读计划
 ```
 
-该示例关闭自动兑换、保持观察模式且没有账号规则。安装后可在面板中再启用。正常运行和升级时不要手动替换策略或删除执行记录。
+`--doctor` 独立运行，无需存在构建产物或管理密钥；显示宿主版本、平台、面板原始/安装指纹、桥接支持、其他插件能力、候选构建及可查询的运行构建。管理密钥不可用时相关项显示未查询。它不刷新额度、不兑换、不重启。
 
-## 校验及安装
+安装器在修改前校验 ELF64/amd64、`dist/BUILD.json` 的版本、ABI/schema、构建提交/时间与共享库 SHA256；Release 内的 `MANIFEST.json` 还校验逐文件完整性。不要为通过预检修改校验值。未知 CPAMC 构建始终拒绝；兼容性见 [COMPATIBILITY.md](COMPATIBILITY.md)。
 
-在解压前校验外部 `SHA256SUMS`，进入安装目录后执行 `sha256sum -c dist/SHA256SUMS`。先查看计划：
+## 两个独立开关与新账号
+
+**首次安装默认：额度保护仅观察；自动使用重置卡关闭；新增账号不自动加入兑换。** `policy.safe-start.example.json` 与新的默认策略一致。安装计划和成功结果分别列出 `quota_mode`、`auto_reset_enabled`、`include_new_accounts`，观察模式本身不禁止已经启用的后台兑换。
+
+通常先安全安装，再在 CPAMC 逐账号选择并启用。若要在第一次启动时明确启用指定账号：
 
 ```bash
-python3 install.py
+sudo python3 install.py --apply --management-key-file /root/cpa-management.key \
+  --auto-reset on --reset-account example-account.json
 ```
 
-将现有 CPA 管理密钥保存在仅 root 可读的文件中，例如通过编辑器填写，而不是写入 shell 历史：
+`--auto-reset on` 必须同时列出至少一个 `--reset-account`，可以重复该参数。安装器始终让 `include_new_accounts=false`。`--auto-reset off` 可显式选择默认关闭。它们只适用于没有 `policy.json` 的首次安装。
+
+**升级保留现有策略和执行记录，不用新默认覆盖老设置。** 旧文件若没有 `include_new_accounts`，后端将其视为 `true`，维持原先缺省账号参与兑换的行为；没有 `auto_reset` 的更老文件也沿用旧版开启行为。升级后请在面板检查，并按需要关闭“自动加入新增账号”。观察/执行模式及既有账号规则保留。
+
+## 密钥和正式安装
+
+将现有 CPA 实际管理密钥保存在仅 root 可读的文件中；不要使用配置中的 bcrypt 哈希，不要把密钥写入 shell 历史：
 
 ```bash
 sudo test -e /root/cpa-management.key || sudo install -m 600 /dev/null /root/cpa-management.key
@@ -44,15 +41,34 @@ sudoedit /root/cpa-management.key
 sudo python3 install.py --apply --management-key-file /root/cpa-management.key
 ```
 
-仅在密钥文件不存在时使用创建命令，避免覆盖已保存内容。文件保存实际密钥，不是配置中的 bcrypt 哈希。安装器不会更换或打印密钥。
+只有密钥文件不存在时才执行创建命令，避免覆盖已有内容。安装器不更换或打印密钥；它把现有密钥复制到状态目录 `cpa-management.key`，属主为服务用户、权限 0600。CPA 管理密钥轮换后同步该文件或重跑安装器。后台重置只通过 CPA 回环管理接口，忽略环境代理、不跟随重定向；不能只替换 `.so` 跳过配置。
 
-实际安装会备份配置、共享库及面板，补充会话桥接，创建私有状态目录，然后重启 CPA 并校验插件注册。失败会恢复旧文件并重启。成功后记录输出的备份路径。
+安装器读取原服务/API 基线，创建并立即输出备份路径，再写入共享库、会话桥接及配置，重启 CPA，验证 active、插件版本及构建身份。它不调用 refresh 或 consume 进行验收，已有后台策略仍按原计划运行。安装失败时恢复旧文件，重新验证服务 active 和原版本 API；恢复失败会明确报告备份路径和未验证状态。
 
-默认从 CPA 的 `requests.proxy-url` 继承查询代理；`--proxy-url direct` 可直连，或指定你自己的 HTTP / HTTPS / SOCKS5 代理。账号自身的代理优先。
+## 其他插件与面板扩展
 
-自 0.2.2 起，后台复用 CPA 管理接口执行重置。安装器会将实际管理密钥写入状态目录的 `cpa-management.key`，仅服务用户可读（0600），并保存该文件的升级前版本以供失败恢复或回滚。密钥不会写入 YAML、策略或状态响应。轮换 CPA 管理密钥后需同步更新此文件，或重新运行安装器。
+纯管理界面或 SSO 插件可以共存；其他调度插件必须先解决调度冲突。安装器优先使用宿主明确返回的 `supports_scheduler` / `capabilities.scheduler`。CPA 8.0.35 的插件列表没有该字段，因此不能仅凭插件名称或菜单判断安全。
 
-**从 0.2.1 升级不能只替换 `.so` 文件**：请运行新版安装器配置管理地址和私有密钥文件；否则自动查询和兑换会显示配置错误，额度保护继续运行。策略和去重 journal 保留。
+旧宿主可提供经维护者核实的能力声明，绑定当前已安装二进制 SHA256：
+
+```json
+{"schema_version":1,"plugins":{"example-menu":{"sha256":"填写已审阅共享库的64位SHA256","scheduler":false}}}
+```
+
+```bash
+sudo python3 install.py --apply --management-key-file /root/cpa-management.key \
+  --plugin-capabilities /root/plugin-capabilities.json
+```
+
+未知能力会在计划/doctor 中标为 unknown，`--apply` 在变更前阻止。二进制更新后原声明自动失效，需重新核实。声明只用于兼容性预检，不加载其他插件、不执行其注册逻辑。仓库测试使用合成的管理插件验证组合安装与回滚，不假定某个公开插件名永远不参与调度。
+
+面板若还有已审核扩展，可用 `--panel-extensions` 保留其标记区块：
+
+```json
+{"extensions":[{"marker":"example-sso","sha256":"填写完整标记区块的64位SHA256"}]}
+```
+
+SHA256 覆盖完整 `\n/* example-sso:start */\n...\n/* example-sso:end */\n` 字节。仅当所有声明区块精确匹配、移除这些区块及本插件旧桥接后仍是已验证的原始 HTML，才允许安装。缺失/重复标记、修改过的区块或区块以外的更改均拒绝。不公开上传实际管理面板或私有声明；示例不包含生产数据。
 
 ## 自定义布局
 
@@ -65,28 +81,15 @@ sudo python3 install.py --apply \
   --management-key-file /root/cpa-management.key
 ```
 
-还支持 `--binary`、`--backup-dir` 和 `--proxy-url`；完整参数见 `python3 install.py --help`。插件目录与状态目录必须为绝对路径。安装器通过本机 HTTP 管理接口验证；CPA 本身只监听 HTTPS 的布局需要手工部署并验证。已有其他启用插件时，安装器会停止并要求先核对调度兼容性。
+其他参数见 `python3 install.py --help`。插件目录与状态目录必须为绝对路径。`--proxy-url direct` 可禁用查询代理；默认继承 CPA `requests.proxy-url`，账号代理优先。安装器只使用回环 HTTP 管理端口，CPA 仅监听 HTTPS 的布局需手工部署和验证。配置合并会保留值，但 YAML 注释/排版会重新生成。
 
-配置合并示例为 `config.example.yaml`，不是可替换整份 CPA 配置的文件。安装器保留配置值，但 YAML 注释和排版会重新生成。
+## 回滚
 
-## 在 CPAMC 中使用
-
-1. 刷新 CPAMC 并正常登录，打开侧栏“账号额度保护”。
-2. 查看账号、额度窗口和卡片。首次查询可能需要等待代理及上游响应。
-3. 在账号卡片中启用额度保护，配置通用比例或独立窗口比例。
-4. 在“策略设置”检查自动重置总开关、提前时间、额度保护模式和未知额度策略。
-5. 保存后检查生效状态；在“执行记录”查看自动兑换结果。
-
-页面直接沿用面板会话，无二次密钥输入。存在编辑草稿时自动刷新暂停；旧修订号保存冲突时重新载入再编辑。断开网页不会停止服务器工作。
-
-## 升级与回滚
-
-升级前保留 `policy.json` 和 `reset-journal.json`，不要在服务运行中删除或手动覆盖。运行新版本安装器时会使用现有策略，保留原保护模式及开关。
-
-使用安装时输出的真实备份目录回滚：
+使用安装前已输出的备份路径，并提供当前实际管理密钥用于恢复后的只读 API 验证：
 
 ```bash
-sudo python3 install.py --rollback /root/cliproxyapi-plugin-backups/quota-guard-替换为实际备份目录
+sudo python3 install.py --rollback /root/cliproxyapi-plugin-backups/quota-guard-实际目录 \
+  --management-key-file /root/cpa-management.key
 ```
 
-回滚恢复配置、共享库、CPAMC HTML 和升级前的插件管理密钥文件，保留策略及 journal。宿主重启期间请求可能短暂不可用。回滚旧代码前确认其能够读取当前状态格式；本安装器的回滚并非状态格式迁移工具。
+回滚恢复配置、共享库、面板及升级前插件密钥，保留 `policy.json` / `reset-journal.json`。原服务和 API 验证通过后才报告成功。旧版安装器创建的备份没有 API 基线，恢复后会明确要求人工验证，不虚报成功。回滚不是状态迁移工具；回滚旧代码前确认状态格式兼容。CPA 重启期间请求可能短暂不可用，关闭开关也不能撤回已经发出的兑换请求。

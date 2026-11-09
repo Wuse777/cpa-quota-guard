@@ -8,6 +8,6 @@
   "resume_gap_percent": 5,
   "unknown_action": "block",
   "strategy": "round-robin",
-  "auto_reset": {"enabled": false, "before_hours": 6, "accounts": {}},
+  "auto_reset": {"enabled": false, "before_hours": 6, "include_new_accounts": false, "accounts": {}},
   "rules": []
 }

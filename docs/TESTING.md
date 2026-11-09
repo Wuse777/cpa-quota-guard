@@ -1,8 +1,8 @@
 # 测试与发布验证
 
-## 日常检查
+测试使用虚构账号和本地服务，不使用生产 OAuth、管理密钥、真实卡片或模型生成。Linux 工具：Go、GCC/cc、OpenSSL、Python 3/PyYAML、Node.js 22 与 Chromium。
 
-Linux、Go、GCC、Node.js、Python 3；Python 依赖见 `requirements.txt`。推荐在虚拟环境安装 Python 依赖：
+## 日常检查
 
 ```bash
 python3 -m venv .venv
@@ -11,73 +11,93 @@ python3 -m pip install -r requirements.txt
 bash scripts/check.sh
 ```
 
-`scripts/check.sh` 执行 Go race / vet、11 项 Node 会话测试和 Python 安装、桥接及打包单元测试。它不使用真实账号；`TestLiveQuotaCompatibility` 未设置环境变量时跳过。
+执行 Go race/vet、Node 会话与界面模型测试、Python 安装/桥接/打包单测。`TestLiveQuotaCompatibility` 未显式设置环境变量时跳过。POSIX 安装事务测试在 Linux 实际执行；Windows 只运行可移植预检，缺少符号链接权限会明确跳过相应测试，不能当成完整 Linux 验证。
 
-GitHub CI 在 Linux 使用 Go 1.23.x 与当前已验证的 1.27.3 执行这些检查及共享库构建。CI 不包含真实账号验收，也不自动在外部服务器安装插件。
+```bash
+bash build.sh
+```
+
+构建运行 Go race/vet，生成 `.so`、C 头文件、`BUILD.json` 和摘要。默认记录 Git HEAD 与 UTC 构建时间；受控发布可通过 `QUOTA_GUARD_BUILD_COMMIT` 和 `QUOTA_GUARD_BUILD_TIME` 指定。构建身份同时写入 Go 状态与 manifest，安装后必须一致。源码导出无 Git 时 commit 为 `source-export`，正式发布应提供真实提交。
+
+## 固定上游夹具
+
+```bash
+python3 scripts/fetch_fixtures.py
+```
+
+下载官方 CPA **8.0.35** Linux amd64 与 CPAMC **1.26.5**，使用固定版本 URL，校验归档、二进制及面板 SHA256。源地址/摘要在脚本中，夹具只写入 Git 忽略的 `test-results/fixtures/`。不使用 latest；校验失败立即停止，不自动信任新摘要。也可使用自己已验证的绝对路径传入后续测试。
 
 ## 真实 CPA 隔离集成
 
-从上游取得 CPA 8.0.35 二进制后，传入其绝对路径：
-
 ```bash
-python3 tests/integration.py \
-  --plugin dist/quota-guard.so \
-  --cpa /absolute/path/to/cli-proxy-api
+python3 tests/integration.py --plugin dist/quota-guard.so \
+  --cpa "$PWD/test-results/fixtures/cli-proxy-api" \
+  --panel "$PWD/test-results/fixtures/management.html"
 ```
 
-需要 Linux、PyYAML、OpenSSL 及空闲回环端口 18317–18319。测试使用虚构 OAuth 账号、本地额度 HTTP 服务和本地 TLS CONNECT 模型代理，不向真实上游发送模型请求。覆盖注册、认证、调度、窗口阈值、恢复、冲突、重启、临期自动兑换及持久化去重，共 26 项检查（包含真实 CPA 转发、嵌套错误持久化、成功列表查询及重启后失败保留）。
+使用独立临时配置、虚构 OAuth、本地额度 HTTP 与 TLS CONNECT 模型代理。覆盖注册/认证/调度、窗口保护与恢复、冲突和重启、自动兑换去重/异常、旧策略兼容、新账号选择和后台健康。用例数由报告动态计算，新增用例后不依赖文档手工计数。默认报告为 `test-results/integration-report.json`，回环端口为 18317–18319。测试失败即阻止发布。
 
-结果默认写入被 Git 忽略的 `test-results/integration-report.json`；可用 `--report` 指定路径。测试目录保留在系统临时目录，便于本机诊断，不要将运行结果直接加入仓库。
+## 安装、组合与回滚
 
-## CPAMC 浏览器验收
-
-提供 [已验证构建](COMPATIBILITY.md) 的原始面板 HTML：
+无 systemd PID 1 的环境也必须运行真实 CPA 进程验收：
 
 ```bash
-python3 tests/integration.py \
-  --plugin dist/quota-guard.so \
-  --cpa /absolute/path/to/cli-proxy-api \
-  --panel /absolute/path/to/management.html \
-  --serve
+python3 tests/install_integration.py --runtime process --plugin dist/quota-guard.so \
+  --cpa "$PWD/test-results/fixtures/cli-proxy-api" \
+  --panel "$PWD/test-results/fixtures/management.html"
 ```
 
-打开 `http://127.0.0.1:18317/management.html`，测试专用密钥为 `quota-guard-integration-only`。它是公开的本地夹具凭据，不能用于生产。未提供有效面板时 `--serve` 会报错。
+process 控制器仅接受随机的测试服务名称，操作 PID 前验证 CPA 路径和临时配置，不调用正式 systemd。安装器实际复制共享库、重启 CPA、验证构建身份，与合成管理插件组合运行，然后回滚并验证原 API、逐字节配置、策略和 journal。它不是将安装结果全部 mock 的单测。
 
-核对：面板登录直接进入插件、全局策略保存、账号与独立窗口阈值、冲突提示、三种主题、标签键盘导航、窄屏溢出和 `prefers-reduced-motion`。截图只使用 `a.json`、`b.json`、`g.json` 等虚构账号。仓库图片来自这一隔离夹具。
-
-## 真实 systemd 安装与回滚
-
-该检查需要 root，启动独立临时 unit，占用回环端口 18417。不会重启正式 CPA unit：
+还必须运行真实 systemd 临时 unit 验收：
 
 ```bash
-sudo .venv/bin/python tests/install_integration.py \
-  --plugin dist/quota-guard.so \
-  --cpa /absolute/path/to/cli-proxy-api \
-  --panel /absolute/path/to/management.html
+sudo .venv/bin/python tests/install_integration.py --runtime systemd \
+  --report test-results/install-systemd-report.json --plugin dist/quota-guard.so \
+  --cpa "$PWD/test-results/fixtures/cli-proxy-api" \
+  --panel "$PWD/test-results/fixtures/management.html"
 ```
 
-覆盖正常基线、真实共享库安装与认证注册、回滚后配置逐字节恢复及策略保留，共 3 项检查。默认报告为 `test-results/install-integration-report.json`。
+需要 root、空闲回环端口 18417 与工作的 systemd。独占创建随机 unit，结束后停止并移除，仅涉及独立临时服务。CI 同时执行 process 和 systemd 两种模式；任意失败都不跳过。正式服务不参与测试。
 
-## 可选真实额度只读检查
-
-仅由维护者显式选择：
+## Chromium 界面与真实会话桥接
 
 ```bash
-QUOTA_GUARD_LIVE_AUTH_DIR=/private/path/to/auths \
-QUOTA_GUARD_LIVE_PROXY=http://127.0.0.1:7890 \
-go test -run TestLiveQuotaCompatibility -v -count=1
+npm ci
+npx playwright install --with-deps chromium
+node tests/browser-regression.mjs
 ```
 
-读取已有授权并查询服务商额度，不刷新 token、不发送模型生成请求、不兑换卡片。不要把真实授权或未经脱敏的日志放入仓库、CI、Issue 或公共附件。
+合成父页面使用真实插件 HTML/CSS/JS，检查草稿与实时状态、保存冻结、冲突保留、搜索/筛选、聚合异常、明暗主题和手机布局。使用锁定版本的 Playwright，截图只含虚构账号。
 
-## 发布
+另外启动真实隔离 CPA/CPAMC：
 
 ```bash
-bash scripts/check.sh
+python3 tests/integration.py --plugin dist/quota-guard.so \
+  --cpa "$PWD/test-results/fixtures/cli-proxy-api" \
+  --panel "$PWD/test-results/fixtures/management.html" --serve
+```
+
+等待 `BROWSER_FIXTURE_READY`，在另一终端运行：
+
+```bash
+node tests/browser-regression.mjs --url http://127.0.0.1:18317/management.html \
+  --key quota-guard-integration-only
+```
+
+该公开测试密钥只属于临时夹具。真实浏览器完成 CPAMC 登录、插件导航、iframe 桥接读/保存/恢复/刷新、主题同步和窄屏检查。`--serve` 必须在隔离测试环境使用，结束后 Ctrl+C 清理。仓库 `docs/images/` 来自虚构夹具，不上传生产截图。
+
+## CI 与发布门禁
+
+`.github/workflows/ci.yml` 对普通 PR、main、`v*` 标签及手工触发执行。Go 1.23.x/1.27.3 矩阵均运行单测和构建；1.27.3 额外执行固定上游夹具下载、真实 CPA 集成、process + systemd 组合安装回滚、合成 Chromium 回归和真实 CPAMC 桥接。没有秘密变量或真实账号依赖。标签版本必须与 `BUILD.json` 一致。
+
+只有验证通过才生成可交付归档；CI 上传安装包及无真实账号的验收报告，不自动公开 GitHub Release 或修改外部服务器。发布者仍需确认该提交的所有门禁通过再上传资产。包内逐文件清单排除私有状态、授权、日志和测试报告：
+
+```bash
 python3 scripts/package_release.py
 (cd release && sha256sum -c SHA256SUMS)
 ```
 
-生成安装归档、外部 SHA256SUMS 和包内逐文件清单。`dist/` 与 `release/` 不提交到 Git。手工发布前核对安装、回滚、兼容性和文档；GitHub CI 只生成 Actions artifact，不自动公开 Release 或更改服务器。
+## 可选真实只读兼容性检查
 
-0.2.2 本轮本地 Linux 构建使用 Go 1.23.12，执行 Go race / vet、15 项 Python 单元测试、11 项 Node 会话测试、26 项真实 CPA 隔离检查及 3 项 systemd 安装回滚检查。真实卡片未用于提前兑换测试。
+维护者单独显式设置 `QUOTA_GUARD_LIVE_AUTH_DIR` / `QUOTA_GUARD_LIVE_PROXY` 后可运行 `go test -run TestLiveQuotaCompatibility -v -count=1`。该检查读取现有授权并查询额度，不刷新 token、不生成模型响应、不兑换卡片；不属于 PR/发布门禁，也不应把真实状态附到 Issue 或公开报告。

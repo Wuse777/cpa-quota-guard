@@ -181,6 +181,11 @@ func resetTestEngine(t *testing.T) (*engine, *resetFixture, account) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.p.AutoReset.Enabled = true
+	e.p.AutoReset.IncludeNewAccounts = true
+	if err := savePolicy(dir, e.p); err != nil {
+		t.Fatal(err)
+	}
 	return e, f, account{ID: "a", Name: "a.json", AuthIndex: "index", Provider: "codex"}
 }
 func resetRequests(f *resetFixture) int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.requests) }

@@ -14,13 +14,14 @@ ROOT_FILES = {
     "SECURITY.md", "CONTRIBUTING.md", "go.mod", "go.sum", "build.sh",
     "requirements.txt", "install.py", "cpamc_bridge.py", "config.example.yaml",
     "policy.example.json", "policy.safe-start.example.json",
+    "package.json", "package-lock.json",
 }
 DIRECTORIES = {
     "web": {".html", ".css", ".js"},
     "licenses": {".txt"},
     "docs": {".md", ".png"},
     "scripts": {".py", ".sh"},
-    "tests": {".py", ".mjs"},
+    "tests": {".py", ".mjs", ".c"},
 }
 
 
@@ -34,7 +35,7 @@ def public_files(root):
     for directory, extensions in DIRECTORIES.items():
         selected.update(p for p in (root / directory).rglob("*")
                         if p.suffix in extensions and "__pycache__" not in p.parts)
-    selected.update(root / "dist" / name for name in ["quota-guard.so", "quota-guard.h", "SHA256SUMS"])
+    selected.update(root / "dist" / name for name in ["quota-guard.so", "quota-guard.h", "SHA256SUMS", "BUILD.json"])
     for path in selected:
         if not path.is_file():
             raise ValueError(f"Missing release input: {path.relative_to(root)}")
@@ -58,10 +59,14 @@ def package(root, output, epoch=0):
     checksums = (root / "dist/SHA256SUMS").read_text().splitlines()
     if f"{sha256(library)}  dist/quota-guard.so" not in checksums:
         raise ValueError("dist/SHA256SUMS does not match the shared library")
+    build = json.loads((root / "dist/BUILD.json").read_text())
+    if build.get("version") != version or build.get("sha256") != sha256(library):
+        raise ValueError("BUILD.json does not match the version/shared library")
     contents = {p.relative_to(root).as_posix(): p.read_bytes() for p in public_files(root)}
     manifest = {
         "schema_version": 1, "name": "cpa-quota-guard", "version": version,
         "target": "linux-amd64-glibc", "verified_cpa": "8.0.35", "verified_cpamc": "1.26.5",
+        "build": build,
         "files": [{"path": name, "size": len(raw), "sha256": sha256(raw)} for name, raw in contents.items()],
     }
     contents["MANIFEST.json"] = (json.dumps(manifest, indent=2) + "\n").encode()

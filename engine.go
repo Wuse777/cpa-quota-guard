@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -12,23 +14,32 @@ import (
 )
 
 type engine struct {
-	mu                sync.Mutex
-	refreshMu         sync.Mutex
-	cfg               runtimeConfig
-	p                 policy
-	host              hostCall
-	snapshots         map[string]snapshot
-	latches           map[string]bool
-	cursors           map[string]string
-	wake              chan struct{}
-	stop              chan struct{}
-	done              chan struct{}
-	lastRefreshError  string
-	resetMu           sync.Mutex
-	resetRunMu        sync.Mutex
-	resetJournal      resetJournal
-	resetJournalError string
-	resetSnapshots    map[string]resetAccountStatus
+	mu                   sync.Mutex
+	refreshMu            sync.Mutex
+	cfg                  runtimeConfig
+	p                    policy
+	host                 hostCall
+	snapshots            map[string]snapshot
+	latches              map[string]bool
+	cursors              map[string]string
+	wake                 chan struct{}
+	stop                 chan struct{}
+	done                 chan struct{}
+	lastRefreshError     string
+	resetMu              sync.Mutex
+	resetRefreshMu       sync.Mutex
+	identityMu           sync.Mutex
+	identityLocks        map[string]*sync.Mutex
+	resetWake            chan struct{}
+	probeRetry           map[string]retryState
+	resetRetry           map[string]retryState
+	health               engineHealth
+	notificationMu       sync.Mutex
+	notificationStatus   notificationStatus
+	notificationAttempts map[string]notificationAttempt
+	resetJournal         resetJournal
+	resetJournalError    string
+	resetSnapshots       map[string]resetAccountStatus
 }
 
 func newEngine(cfg runtimeConfig, host hostCall) (*engine, error) {
@@ -46,49 +57,49 @@ func newEngine(cfg runtimeConfig, host hostCall) (*engine, error) {
 		return nil, err
 	}
 	journal, journalErr := loadResetJournal(cfg.StateDir)
-	e := &engine{cfg: cfg, p: p, host: host, snapshots: map[string]snapshot{}, latches: map[string]bool{}, cursors: map[string]string{}, wake: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}), resetJournal: journal, resetSnapshots: map[string]resetAccountStatus{}}
+	e := &engine{cfg: cfg, p: p, host: host, snapshots: map[string]snapshot{}, latches: map[string]bool{}, cursors: map[string]string{}, wake: make(chan struct{}, 1), resetWake: make(chan struct{}, 1), identityLocks: map[string]*sync.Mutex{}, probeRetry: map[string]retryState{}, resetRetry: map[string]retryState{}, notificationAttempts: map[string]notificationAttempt{}, stop: make(chan struct{}), done: make(chan struct{}), resetJournal: journal, resetSnapshots: map[string]resetAccountStatus{}}
 	if journalErr != nil {
 		e.resetJournalError = "重置卡执行记录读取失败；自动使用已暂停，额度保护继续运行"
+	}
+	if cfg.NotificationWebhookFile != "" {
+		e.notificationStatus = notificationStatus{Enabled: true, Health: "ready"}
+		if _, err := readWebhook(cfg.NotificationWebhookFile); err != nil {
+			e.notificationStatus.Health = "error"
+			e.notificationStatus.LastError = err.Error()
+		}
 	}
 	return e, nil
 }
 
 func (e *engine) run() {
 	defer close(e.done)
-	for {
-		ctx, cancel := context.WithCancel(context.Background())
-		finished := make(chan struct{})
-		go func() {
-			select {
-			case <-e.stop:
-				cancel()
-			case <-finished:
-			}
-		}()
-		_ = e.refresh(ctx)
-		close(finished)
-		cancel()
-		e.mu.Lock()
-		interval := time.Duration(e.p.PollSeconds) * time.Second
-		if e.p.AutoReset.Enabled && interval > time.Minute {
-			interval = time.Minute
-		}
-		e.mu.Unlock()
-		timer := time.NewTimer(interval)
-		select {
-		case <-e.stop:
-			timer.Stop()
-			return
-		case <-e.wake:
-			timer.Stop()
-		case <-timer.C:
-		}
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var workers sync.WaitGroup
+	workers.Add(3)
+	go func() { defer workers.Done(); e.runQuotaWorker(ctx) }()
+	go func() { defer workers.Done(); e.runResetWorker(ctx) }()
+	go func() { defer workers.Done(); e.runNotificationWorker(ctx) }()
+	<-e.stop
+	cancel()
+	workers.Wait()
 }
 
+// Synchronous refresh is also useful for isolated checks; scheduled workers run independently.
 func (e *engine) refresh(ctx context.Context) error {
+	if err := e.refreshQuota(ctx, true); err != nil {
+		return err
+	}
+	return e.refreshResets(ctx, true)
+}
+
+func (e *engine) refreshQuota(ctx context.Context, force bool) error {
 	e.refreshMu.Lock()
 	defer e.refreshMu.Unlock()
+	e.mu.Lock()
+	e.health.QuotaRefreshing = true
+	e.mu.Unlock()
+	defer func() { e.mu.Lock(); e.health.QuotaRefreshing = false; e.mu.Unlock() }()
 	var result struct {
 		Files []account `json:"files"`
 	}
@@ -117,20 +128,22 @@ func (e *engine) refresh(ctx context.Context) error {
 		e.mu.Lock()
 		old := e.snapshots[a.ID]
 		old.Account = a
+		retry := e.probeRetry[a.ID]
 		e.snapshots[a.ID] = old
 		e.mu.Unlock()
-		if a.Disabled || (a.Provider != "codex" && a.Provider != "antigravity") {
+		if a.Disabled || (a.Provider != "codex" && a.Provider != "antigravity") || (!force && time.Now().Before(retry.NextAt)) {
 			continue
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return ctx.Err()
 		}
 		wg.Add(1)
 		go func(a account) {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				return
-			}
+			defer func() { <-sem }()
 			probeCtx, cancel := context.WithTimeout(ctx, time.Duration(p.TimeoutSeconds)*time.Second)
 			defer cancel()
 			buckets, err := probeAccount(probeCtx, e.host, cfg, a)
@@ -139,9 +152,15 @@ func (e *engine) refresh(ctx context.Context) error {
 			defer e.mu.Unlock()
 			s := e.snapshots[a.ID]
 			s.AttemptAt = now
+			if err == nil {
+				err = e.checkWindowContinuity(s, buckets)
+			}
 			if err != nil {
+				e.probeRetry[a.ID] = nextRetry(e.probeRetry[a.ID], now)
 				s.Error = err.Error()
 			} else {
+				delete(e.probeRetry, a.ID)
+				e.health.LastQuotaSuccessAt = now
 				s.Buckets = buckets
 				s.CheckedAt = now
 				s.Error = ""
@@ -150,19 +169,17 @@ func (e *engine) refresh(ctx context.Context) error {
 		}(a)
 	}
 	wg.Wait()
-	for _, a := range result.Files {
-		if a.ID == "" {
-			a.ID = a.Name
-		}
-		if a.Provider == "codex" && !a.Disabled && ctx.Err() == nil {
-			e.processReset(ctx, a)
-		}
-	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for id := range e.snapshots {
 		if !seen[id] {
 			delete(e.snapshots, id)
+			delete(e.probeRetry, id)
+			for key := range e.latches {
+				if strings.HasPrefix(key, id+"\x00") {
+					delete(e.latches, key)
+				}
+			}
 		}
 	}
 	// Observe every window on each poll, even when there are no model requests or UI readers.
@@ -175,14 +192,20 @@ func (e *engine) refresh(ctx context.Context) error {
 
 func (e *engine) notifyRefresh() {
 	select {
+	case e.resetWake <- struct{}{}:
+	default:
+	}
+	select {
 	case e.wake <- struct{}{}:
 	default:
 	}
 }
 
-func (e *engine) ruleFor(a account) *rule {
-	for i := range e.p.Rules {
-		r := &e.p.Rules[i]
+func (e *engine) ruleFor(a account) *rule { return ruleForPolicy(e.p, a) }
+
+func ruleForPolicy(p policy, a account) *rule {
+	for i := range p.Rules {
+		r := &p.Rules[i]
 		if r.Account == a.Name || r.Account == a.ID || r.Account == a.AuthIndex {
 			return r
 		}
@@ -318,18 +341,21 @@ func (e *engine) status() any {
 	for _, s := range e.snapshots {
 		d := e.evaluate(s.Account, time.Now())
 		reset, _, _ := e.resetView(s.Account)
-		statuses = append(statuses, accountStatus{snapshot: s, decision: d, WouldBlock: d.Protected, Reset: reset})
+		statuses = append(statuses, accountStatus{snapshot: s, decision: d, WouldBlock: d.Protected, Reset: reset, Health: quotaHealth(s, e.p, time.Now()), EffectiveRule: e.ruleFor(s.Account), Warnings: e.ruleWarnings(s.Account)})
 	}
 	sort.Slice(statuses, func(i, j int) bool { return statuses[i].Account.Name < statuses[j].Account.Name })
 	_, events, resetError := e.resetView(account{})
 	return struct {
-		Version      string          `json:"version"`
-		Policy       policy          `json:"policy"`
-		Accounts     []accountStatus `json:"accounts"`
-		RefreshError string          `json:"refresh_error,omitempty"`
-		ResetEvents  []resetEvent    `json:"reset_events"`
-		ResetError   string          `json:"reset_error,omitempty"`
-	}{version, e.p, statuses, e.lastRefreshError, events, resetError}
+		Version       string             `json:"version"`
+		Policy        policy             `json:"policy"`
+		Accounts      []accountStatus    `json:"accounts"`
+		RefreshError  string             `json:"refresh_error,omitempty"`
+		ResetEvents   []resetEvent       `json:"reset_events"`
+		ResetError    string             `json:"reset_error,omitempty"`
+		Build         buildInfo          `json:"build"`
+		Health        engineHealth       `json:"health"`
+		Notifications notificationStatus `json:"notifications"`
+	}{version, e.p, statuses, e.lastRefreshError, events, resetError, buildInfo{version, buildCommit, buildTime, runtime.Version(), "0.3.0", "8.0.35 / C ABI 1 / schema 6", "1.26.5 (verified HTML build)"}, e.health, e.notificationsView()}
 }
 
 var errRevision = errors.New("配置已被其他页面修改，请刷新后重试")
@@ -347,9 +373,30 @@ func (e *engine) updatePolicy(p policy) error {
 	if err := savePolicy(e.cfg.StateDir, p); err != nil {
 		return errors.New("保存策略失败；原策略继续生效，请检查 state_dir 写入权限")
 	}
+	previous := e.p
 	e.p = p
-	e.latches = map[string]bool{}
-	e.cursors = map[string]string{}
-	e.notifyRefresh()
+	for key := range e.latches {
+		id := strings.SplitN(key, "\x00", 2)[0]
+		a := account{ID: id, Name: id}
+		if snap, ok := e.snapshots[id]; ok {
+			a = snap.Account
+		}
+		oldRule := ruleForPolicy(previous, a)
+		newRule := e.ruleFor(a)
+		if previous.SafetyPercent != p.SafetyPercent || previous.ResumeGapPercent != p.ResumeGapPercent || !reflect.DeepEqual(oldRule, newRule) {
+			delete(e.latches, key)
+		}
+	}
+	if previous.Strategy != p.Strategy {
+		e.cursors = map[string]string{}
+	}
+	select {
+	case e.wake <- struct{}{}:
+	default:
+	}
+	select {
+	case e.resetWake <- struct{}{}:
+	default:
+	}
 	return nil
 }

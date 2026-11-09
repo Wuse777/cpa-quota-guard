@@ -11,6 +11,7 @@ import http.client
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -39,16 +40,25 @@ model_calls = []
 reset_cards = {}
 reset_calls = []
 reset_failure = False
+missing_primary = set()
+reset_query_delay = 0
+inventory_started = threading.Event()
 
 
 class Probe(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         name = self.path.rsplit("/", 1)[-1]
         if "/codex-reset/" in self.path:
+            if reset_query_delay:
+                inventory_started.set()
+                time.sleep(reset_query_delay)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"credits": reset_cards.get(name, [])}).encode())
+            try:
+                self.wfile.write(json.dumps({"credits": reset_cards.get(name, [])}).encode())
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # Expected when the slow-inventory scenario cancels an old refresh.
             return
         if name in failures:
             self.send_response(503)
@@ -66,6 +76,8 @@ class Probe(http.server.BaseHTTPRequestHandler):
             data = {"rate_limit": {"primary_window": {
                 "used_percent": 100 - remaining, "limit_window_seconds": 18000},
                 "secondary_window": {"used_percent": 10, "limit_window_seconds": 604800}}}
+            if name in missing_primary:
+                data["rate_limit"].pop("primary_window")
         self.wfile.write(json.dumps(data).encode())
 
     def do_POST(self):
@@ -192,7 +204,10 @@ def generate(model, stream=False):
 
 
 def main():
-    global reset_failure
+    global reset_failure, reset_query_delay
+    def stop_on_signal(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop_on_signal)
     parser = argparse.ArgumentParser()
     parser.add_argument("--plugin", required=True)
     parser.add_argument("--cpa", default="/opt/cliproxyapi/cli-proxy-api")
@@ -201,6 +216,10 @@ def main():
     parser.add_argument("--report", type=Path, default=Path("test-results/integration-report.json"))
     parser.add_argument("--serve", action="store_true")
     args = parser.parse_args()
+    args.cpa = str(Path(args.cpa).resolve())
+    args.plugin = str(Path(args.plugin).resolve())
+    args.panel = args.panel.resolve()
+    args.report = args.report.resolve()
     work = Path(tempfile.mkdtemp(prefix="quota-guard-integration-"))
     auths = work / "auths"
     auths.mkdir()
@@ -261,7 +280,15 @@ def main():
     try:
         proc = start()
         s = wait_for(lambda s: len(s["accounts"]) == 3 and all(a["buckets"] for a in s["accounts"]))
-        check("native plugin registration and background queries", s["version"] == "0.2.2")
+        expected_version = re.search(r'const version = "([^"]+)"',
+                                    (Path(__file__).parents[1] / "types.go").read_text()).group(1)
+        check("native plugin registration and background queries", s["version"] == expected_version)
+        check("fresh installations require explicit automatic redemption enrollment",
+              s["policy"]["auto_reset"]["enabled"] is False
+              and s["policy"]["auto_reset"]["include_new_accounts"] is False)
+        check("runtime exposes build provenance and compatibility",
+              s.get("build", {}).get("version") == expected_version
+              and bool(s["build"].get("commit")))
         plugins = api("/v8/management/plugins")[1]
         check("CPAMC plugin metadata and menu", any(p.get("id") == "quota-guard" and p.get("menus") for p in plugins["plugins"]))
         check("anonymous status rejected", api(PREFIX + "/status", key="")[0] == 401)
@@ -306,11 +333,25 @@ def main():
         wait_for(lambda s: any(a["account"]["name"] == "a.json" and a["buckets"][0]["remaining_percent"] == 26 for a in s["accounts"]))
         generate(model)
         check("recovery gap avoids premature reuse", model_calls[-1] == "b.json")
+        p = status()["policy"]
+        p["auto_reset"]["before_hours"] = 7
+        save(p)
+        generate(model)
+        check("saving unrelated settings preserves recovery hysteresis", model_calls[-1] == "b.json")
         quota["a.json"] = 30
         refresh()
         wait_for(lambda s: any(a["account"]["name"] == "a.json" and not a["would_block"] for a in s["accounts"]))
         generate(model)
         check("fresh quota recovery restores higher-priority account", model_calls[-1] == "a.json")
+        p = status()["policy"]
+        p["rules"][0]["min_remaining_percent"] = 97
+        s = save(p)
+        check("a threshold that blocks full quota has an explicit warning",
+              any(a["account"]["name"] == "a.json" and a.get("warnings")
+                  for a in s["accounts"]))
+        p = s["policy"]
+        p["rules"][0]["min_remaining_percent"] = 20
+        save(p)
         quota["a.json"] = 10
         refresh()
         wait_for(lambda s: any(a["account"]["name"] == "a.json" and a["would_block"] for a in s["accounts"]))
@@ -320,6 +361,38 @@ def main():
         generate(model)
         check("query failure retains last valid protection", model_calls[-1] == "b.json")
         failures.clear()
+        missing_primary.add("a.json")
+        previous_attempt = next(a["attempt_at"] for a in status()["accounts"]
+                                if a["account"]["name"] == "a.json")
+        refresh()
+        wait_for(lambda s: any(a["account"]["name"] == "a.json" and
+                              a["attempt_at"] != previous_attempt and
+                              (a.get("error") or a.get("health") != "healthy")
+                              for a in s["accounts"]))
+        generate(model)
+        check("a disappearing known quota window cannot release a protected account",
+              model_calls[-1] == "b.json")
+        missing_primary.clear()
+        refresh()
+        wait_for(lambda s: any(a["account"]["name"] == "a.json" and not a.get("error")
+                              for a in s["accounts"]))
+        reset_query_delay = 3
+        inventory_started.clear()
+        refresh()
+        assert inventory_started.wait(timeout=5), "inventory delay fixture did not start"
+        quota["a.json"] = 80
+        began = time.monotonic()
+        refresh()
+        wait_for(lambda s: any(a["account"]["name"] == "a.json" and
+                              a["buckets"][0]["remaining_percent"] == 80
+                              for a in s["accounts"]), seconds=2.5)
+        check("slow card inventory does not delay fresh quota observations",
+              time.monotonic() - began < 2.5)
+        reset_query_delay = 0
+        quota["a.json"] = 10
+        refresh()
+        wait_for(lambda s: any(a["account"]["name"] == "a.json" and a["would_block"]
+                              for a in s["accounts"]))
         saved_revision = status()["policy"]["revision"]
         proc.terminate()
         proc.wait(timeout=15)
@@ -334,7 +407,10 @@ def main():
         # Disable the account before publishing its due card: the scheduler is
         # independent of PUT policy and can otherwise redeem between these steps.
         p = status()["policy"]
-        p["auto_reset"]["accounts"] = {"b.json": False}
+        p["auto_reset"]["enabled"] = True
+        p["auto_reset"]["include_new_accounts"] = False
+        p["auto_reset"]["before_hours"] = 6
+        p["auto_reset"]["accounts"] = {"a.json": True, "b.json": False}
         save(p)
         reset_cards["a.json"] = [card("due-card", 5), card("future-card", 48)]
         reset_cards["b.json"] = [card("disabled-card", 4)]

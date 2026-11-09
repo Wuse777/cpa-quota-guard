@@ -17,6 +17,9 @@ Independent community plugin; not affiliated with CLIProxyAPI, CPAMC, OpenAI, or
 - Durable redemption IDs and event history for verification after failures or restarts.
 - Existing CPAMC login and theme, without a second plugin login or credentials copied to the iframe.
 - Native-style controls and motion, keyboard tabs, responsive layout, and reduced-motion support.
+- Independent quota/reset workers, bounded concurrency, retry backoff and retained last-good quota snapshots.
+- Live account summaries separated from editable policy drafts, search/filtering, grouped errors and preserved conflict drafts.
+- Optional private Webhook notifications, build provenance, compatibility diagnostics and verified rollback.
 
 ## Verified compatibility
 
@@ -30,16 +33,19 @@ Download the archive and `SHA256SUMS` from this repository's Releases:
 
 ```bash
 sha256sum -c SHA256SUMS
-tar -xzf cpa-quota-guard_0.2.2_linux_amd64.tar.gz
-cd cpa-quota-guard-0.2.2
+tar -xzf cpa-quota-guard_0.3.0_linux_amd64.tar.gz
+cd cpa-quota-guard-0.3.0
 sha256sum -c dist/SHA256SUMS
 python3 install.py  # read-only plan
+python3 install.py --doctor  # independent compatibility/build diagnosis
 sudo python3 install.py --apply --management-key-file /root/cpa-management.key
 ```
 
 The key file must contain your existing CPA management key and be readable only by root. The installer backs up the library, configuration, and panel, restarts CPA, verifies registration, and rolls back on failure. Open **账号额度保护** in CPAMC after signing in normally. See the installation guide for rollback and custom paths.
 
-**Initial defaults: quota protection observes only; automatic credit use is enabled with a six-hour lead. These are independent.** To prevent automatic redemption from the first startup, preseed the disabled policy described in the installation guide.
+**0.3.0 first-install defaults: observe quota protection, automatic credit use disabled, and new accounts excluded from automatic redemption.** The switches are independent: observe mode does not suspend reset automation once enabled. Select accounts in CPAMC before enabling, or explicitly use `--auto-reset on --reset-account example-account.json` on first installation. Upgrades preserve existing policy and journal bytes. Older policies without `include_new_accounts` retain the previous `true` behavior; review that switch after upgrading.
+
+Management-only/SSO plugins may coexist. Scheduler capability checks replace the former blanket rejection. CPA 8.0.35 lacks scheduler flags, so audited capability declarations must match the exact installed binary SHA256; unknown capabilities block apply before changes. Existing panel extensions also need exact marked-block SHA256 declarations, while the original verified CPAMC HTML hash remains mandatory. See [installation](docs/INSTALLATION.md).
 
 ## Important behavior
 
@@ -56,6 +62,10 @@ bash build.sh
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/TESTING.md](docs/TESTING.md). Unit and isolated integration tests use fake accounts; production credentials, logs, and runtime state are not part of this repository.
+
+The build writes `dist/BUILD.json` with version, commit, time, target, ABI/schema and binary SHA256. Installation verifies artifact integrity and running build identity. Both normal PR and release-tag CI gates execute real isolated CPA integration, process and systemd installation/rollback, synthetic browser regression and real CPAMC login/bridge smoke tests using pinned public fixtures.
+
+Notifications are disabled unless `notification_webhook_file` is configured. This service-owned regular 0600 file contains an HTTPS Webhook URL; the URL is never returned in status or errors. Notifications use sanitized event types and account fingerprints, bounded timeouts, deduplication and retry backoff. See [configuration](docs/CONFIGURATION.md) for fields and permissions.
 
 MIT license; upstream and dependency notices are preserved in [NOTICE](NOTICE) and [licenses/](licenses/). Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 

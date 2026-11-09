@@ -20,14 +20,17 @@ type resetCredit struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 type resetAccountStatus struct {
-	Enabled    bool          `json:"enabled"`
-	Credits    []resetCredit `json:"credits"`
-	CheckedAt  time.Time     `json:"checked_at,omitempty"`
-	AttemptAt  time.Time     `json:"attempt_at,omitempty"`
-	NextAt     time.Time     `json:"next_at,omitempty"`
-	Message    string        `json:"message"`
-	Error      string        `json:"error,omitempty"`
-	LastResult *resetResult  `json:"last_result,omitempty"`
+	Enabled        bool          `json:"enabled"`
+	Credits        []resetCredit `json:"credits"`
+	CheckedAt      time.Time     `json:"checked_at,omitempty"`
+	AttemptAt      time.Time     `json:"attempt_at,omitempty"`
+	NextAt         time.Time     `json:"next_at,omitempty"`
+	Message        string        `json:"message"`
+	Error          string        `json:"error,omitempty"`
+	LastResult     *resetResult  `json:"last_result,omitempty"`
+	SchedulerState string        `json:"scheduler_state"`
+	BlockedReason  string        `json:"blocked_reason"`
+	QueryError     string        `json:"query_error,omitempty"`
 }
 type resetOperation struct {
 	Account         string       `json:"account"`
@@ -45,12 +48,13 @@ type resetOperation struct {
 	LastResult      *resetResult `json:"last_result,omitempty"`
 }
 type resetEvent struct {
-	At      time.Time    `json:"at"`
-	Account string       `json:"account"`
-	Credit  string       `json:"credit"`
-	State   string       `json:"state"`
-	Message string       `json:"message"`
-	Result  *resetResult `json:"result,omitempty"`
+	At          time.Time    `json:"at"`
+	Account     string       `json:"account"`
+	Credit      string       `json:"credit"`
+	State       string       `json:"state"`
+	Message     string       `json:"message"`
+	Result      *resetResult `json:"result,omitempty"`
+	OperationID string       `json:"operation_id"`
 }
 type resetJournal struct {
 	Version    int                       `json:"version"`
@@ -77,6 +81,16 @@ func loadResetJournal(dir string) (resetJournal, error) {
 		if op.LastResult == nil && op.Attempts > 0 && op.State != "success" && op.State != "confirmed" {
 			op.LastResult = &resetResult{At: op.UpdatedAt, Error: "历史兑换未确认成功；旧版本未保存 HTTP 状态及上游错误：" + op.Message}
 			j.Operations[key] = op
+		}
+	}
+	for i := range j.Events {
+		if j.Events[i].OperationID == "" {
+			for key, op := range j.Operations {
+				if j.Events[i].Account == op.Account && j.Events[i].Credit == op.Target {
+					j.Events[i].OperationID = key
+					break
+				}
+			}
 		}
 	}
 	return j, nil
@@ -125,7 +139,7 @@ func (e *engine) commitReset(key string, op resetOperation, event bool) error {
 	op.UpdatedAt = time.Now()
 	e.resetJournal.Operations[key] = op
 	if event {
-		e.resetJournal.Events = append(e.resetJournal.Events, resetEvent{At: op.UpdatedAt, Account: op.Account, Credit: op.Target, State: op.State, Message: op.Message, Result: op.LastResult})
+		e.resetJournal.Events = append(e.resetJournal.Events, resetEvent{At: op.UpdatedAt, Account: op.Account, Credit: op.Target, State: op.State, Message: op.Message, Result: op.LastResult, OperationID: key})
 		if len(e.resetJournal.Events) > 200 {
 			e.resetJournal.Events = e.resetJournal.Events[len(e.resetJournal.Events)-200:]
 		}
@@ -152,7 +166,7 @@ func resetEnabled(p resetPolicy, a account) bool {
 			return enabled
 		}
 	}
-	return true
+	return p.IncludeNewAccounts
 }
 
 func parseResetCredits(raw []byte) ([]resetCredit, *int, error) {
@@ -235,15 +249,12 @@ func requestUUID() (string, error) {
 	return s[:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:], nil
 }
 
-// refreshMu serializes refresh cycles; resetRunMu also serializes aliases of the
-// same upstream account. Quota probes and model scheduling never wait on network
-// calls while holding the engine policy lock.
+// Identity locks serialize aliases of the same upstream account while unrelated
+// accounts run concurrently. Network I/O never holds the engine policy lock.
 func (e *engine) processReset(ctx context.Context, a account) {
 	if a.Provider != "codex" || a.Disabled {
 		return
 	}
-	e.resetRunMu.Lock()
-	defer e.resetRunMu.Unlock()
 	e.mu.Lock()
 	cfg := e.cfg
 	p := e.p.AutoReset
@@ -252,20 +263,24 @@ func (e *engine) processReset(ctx context.Context, a account) {
 	e.resetMu.Lock()
 	s := e.resetSnapshots[a.ID]
 	s.Enabled = resetEnabled(p, a)
+	s.SchedulerState, s.BlockedReason, s.QueryError = "waiting", "", ""
 	s.AttemptAt = time.Now()
 	e.resetMu.Unlock()
 	defer func() { e.resetMu.Lock(); e.resetSnapshots[a.ID] = s; e.resetMu.Unlock() }()
 	api, err := newResetAPI(e.host, cfg, a)
 	if err != nil {
-		s.Error = err.Error()
+		s.Error, s.QueryError = err.Error(), err.Error()
 		return
 	}
+	identityLock := e.resetIdentityLock(api.identity)
+	identityLock.Lock()
+	defer identityLock.Unlock()
 	defer api.client.CloseIdleConnections()
 	queryCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	credits, applicable, err := api.list(queryCtx)
 	cancel()
 	if err != nil {
-		s.Error = err.Error()
+		s.Error, s.QueryError = err.Error(), err.Error()
 		return
 	}
 	now := time.Now()
@@ -274,10 +289,12 @@ func (e *engine) processReset(ctx context.Context, a account) {
 	s.Error = ""
 	s.NextAt = time.Time{}
 	s.Message = "暂无可用重置卡"
+	s.SchedulerState = "no_credits"
 	for _, c := range credits {
 		if c.ExpiresAt.After(now) {
 			s.NextAt = c.ExpiresAt.Add(-time.Duration(p.BeforeHours * float64(time.Hour)))
 			s.Message = "等待进入到期前自动使用窗口"
+			s.SchedulerState = "waiting"
 			break
 		}
 	}
@@ -285,6 +302,7 @@ func (e *engine) processReset(ctx context.Context, a account) {
 	defer e.resetMu.Unlock()
 	if e.resetJournalError != "" {
 		s.Error = e.resetJournalError
+		s.SchedulerState, s.BlockedReason = "blocked", e.resetJournalError
 		return
 	}
 	// A successful list query must not erase a failed redemption, including after restart.
@@ -315,6 +333,7 @@ func (e *engine) processReset(ctx context.Context, a account) {
 		}
 		if old.State == "mismatch" && now.Before(old.ExpiresAt) {
 			s.Error = "发现其他重置卡变为不可用；该账号暂停自动兑换至目标卡到期，请检查执行记录"
+			s.SchedulerState, s.BlockedReason = "blocked", s.Error
 			return
 		}
 		if old.State == "pending" || old.State == "confirmed" {
@@ -324,6 +343,17 @@ func (e *engine) processReset(ctx context.Context, a account) {
 		}
 	}
 	if key != "" {
+		if !op.ExpiresAt.After(now) && op.State == "confirmed" {
+			op.State = "success"
+			op.Message = "上游已确认重置；目标卡已到期，结束列表同步核实"
+			if e.commitReset(key, op, true) != nil {
+				s.Error = e.resetJournalError
+				return
+			}
+			s.Message = op.Message
+			e.finishResetCooldown(a, key, op, &s)
+			return
+		}
 		if !op.ExpiresAt.After(now) {
 			op.State = "expired"
 			if op.LastResult == nil {
@@ -352,6 +382,7 @@ func (e *engine) processReset(ctx context.Context, a account) {
 			op.Message = "兑换后其他卡变为不可用，已暂停该账号，避免连续消耗"
 			_ = e.commitReset(key, op, true)
 			s.Error = op.Message
+			s.SchedulerState, s.BlockedReason = "blocked", op.Message
 			return
 		}
 		if !hasCredit(credits, op.Target) {
@@ -368,6 +399,7 @@ func (e *engine) processReset(ctx context.Context, a account) {
 			return
 		}
 		if op.State == "confirmed" {
+			s.SchedulerState = "verifying"
 			s.Message = "上游已确认重置，等待卡片列表同步；不会再次兑换"
 			e.finishResetCooldown(a, key, op, &s)
 			return
@@ -379,6 +411,7 @@ func (e *engine) processReset(ctx context.Context, a account) {
 		}
 		if applicable != nil && *applicable == 0 {
 			s.Message = "上游当前不允许使用重置卡，将继续检查"
+			s.SchedulerState, s.BlockedReason = "blocked", s.Message
 			return
 		}
 		for _, credit := range credits {
@@ -406,6 +439,7 @@ func (e *engine) processReset(ctx context.Context, a account) {
 		return
 	}
 	if now.Before(op.NextTryAt) {
+		s.SchedulerState, s.BlockedReason = "retry_wait", "等待重试；历史兑换结果见执行记录"
 		s.NextAt = op.NextTryAt
 		s.Message = op.Message
 		return
@@ -439,6 +473,7 @@ func (e *engine) processReset(ctx context.Context, a account) {
 		}
 		op.BeforeIDs = creditIDs(credits)
 	}
+	s.SchedulerState = "ready"
 	op.State = "pending"
 	op.Attempts++
 	op.NextTryAt = now.Add(5 * time.Minute)
@@ -447,7 +482,9 @@ func (e *engine) processReset(ctx context.Context, a account) {
 		s.Error = e.resetJournalError
 		return
 	}
-	// Release only the journal lock during network I/O. resetRunMu still prevents
+	s.Message = op.Message
+	e.resetSnapshots[a.ID] = s // Publish the in-flight state without holding a lock over network I/O.
+	// Release only the journal lock during network I/O. The identity lock prevents
 	// simultaneous requests for account aliases and settings remain readable.
 	e.resetMu.Unlock()
 	consumeCtx, consumeCancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
@@ -459,6 +496,7 @@ func (e *engine) processReset(ctx context.Context, a account) {
 	s.LastResult, s.Error = &result, result.Error
 	if consumeErr == nil && httpStatus >= 200 && httpStatus < 300 && (result.Code == "reset" || result.Code == "already_redeemed") && result.Error == "" {
 		op.State = "confirmed"
+		s.SchedulerState = "verifying"
 		op.Message = "上游已确认重置，正在核实卡片消耗"
 		op.NextTryAt = time.Time{}
 		if e.commitReset(key, op, true) != nil {
@@ -492,6 +530,7 @@ func (e *engine) processReset(ctx context.Context, a account) {
 	}
 	s.Message = op.Message
 	s.NextAt = op.NextTryAt
+	s.SchedulerState, s.BlockedReason = "retry_wait", "等待重试；历史兑换结果见执行记录"
 }
 
 // resetMu is held. A confirmed reset clears only CPA's in-memory cooldown, never
@@ -508,6 +547,7 @@ func (e *engine) finishResetCooldown(a account, key string, op resetOperation, s
 	e.resetMu.Lock()
 	if err != nil || result.AuthIndex != a.AuthIndex {
 		s.Error = "重置已确认，但 CPA 冷却状态未清除；下次查询继续核实"
+		s.SchedulerState, s.BlockedReason = "blocked", s.Error
 		return
 	}
 	op.CooldownCleared = true
@@ -522,6 +562,7 @@ func (e *engine) resetView(a account) (*resetAccountStatus, []resetEvent, string
 	if a.Provider == "codex" {
 		s := e.resetSnapshots[a.ID]
 		s.Enabled = resetEnabled(e.p.AutoReset, a)
+		s.SchedulerState, s.BlockedReason = resetSchedulerState(s, e.resetJournalError)
 		s.Credits = append([]resetCredit{}, s.Credits...)
 		status = &s
 	}

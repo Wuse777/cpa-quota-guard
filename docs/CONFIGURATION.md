@@ -31,11 +31,14 @@
 
 | 字段 | 默认 | 含义 |
 | --- | --- | --- |
-| `auto_reset.enabled` | `true` | 服务器后台自动兑换总开关 |
+| `auto_reset.enabled` | `false` | 新安装的服务器后台自动兑换总开关 |
 | `auto_reset.before_hours` | 6 | 到期前多少小时进入窗口，0.1–168 |
-| `auto_reset.accounts` | `{}` | 账号独立开关；缺省开启 |
+| `auto_reset.include_new_accounts` | `false` | 未在账号开关映射中明确设置的新账号是否参加兑换 |
+| `auto_reset.accounts` | `{}` | 账号独立开关；优先于 `include_new_accounts` |
 
-自动兑换独立于 `mode`；即使只观察额度也会运行。启用时轮询间隔不超过 60 秒，实际检查受网络耗时影响。升级旧策略时若没有 `auto_reset` 字段，会补默认开启和提前 6 小时。
+自动兑换独立于 `mode`；启用后即使只观察额度也会运行。首次安装默认关闭并排除新增账号。旧策略缺少 `include_new_accounts` 时视为 `true`，缺少整个 `auto_reset` 时沿用旧版开启和提前 6 小时，保持既有行为；安装器不覆盖旧策略/journal。请在升级后按需要明确关闭“自动加入新增账号”。
+
+额度与卡片查询由独立任务处理，使用有限并发和按账号失败退避，慢账号不会串行阻塞所有账号；同一账号的兑换互斥。额度查询失败保留最后成功快照至有效期结束，`attempt_at` 与 `checked_at` 分别表达最近尝试和成功时间。手工刷新可唤醒额度/卡片任务，但不能绕过未确认兑换编号或持久化保护。自动兑换启用时目标检查间隔为 60 秒，实际时间仍受网络请求耗时和退避影响。
 
 仅处理可用、未过期的 `codex_rate_limits` 卡片，优先考虑最早到期者。请求编号先持久化再提交；超时或不明确响应先核实并沿用原编号重试。明确未执行的拒绝延后约 5 分钟。上游确认后只核实卡片同步，不持续重新提交。
 
@@ -51,6 +54,8 @@
 
 ## 数据与接口
 
+状态中的 `build` 包含版本、commit、built_at、Go 版本、桥接版本和已验证宿主范围；`health` 包含额度/卡片最后成功时间和两个任务的运行状态。`reset.query_error` 是本轮卡片查询问题，`last_result.error` 是保留的历史兑换问题，两者不能直接等同于当前账号被保护。
+
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
 | GET | `/v0/management/plugins/quota-guard/status` | 当前策略、账号、额度、卡片和执行记录 |
@@ -63,3 +68,22 @@
 状态目录为 0700，策略与执行记录为 0600；额度快照保存在内存，重启后重新查询。插件读取 CPA 管理的当前 OAuth 授权及代理，不修改账号 disabled 标志或 OAuth 文件。
 
 运行配置 `test_probe_base` 仅允许本地回环 HTTP，专用于隔离测试，生产不要配置。运行配置样例见根目录 `config.example.yaml`。
+
+## 可选健康通知
+
+默认不发送通知。需要时由维护者预先创建服务用户可读的**普通 0600 文件**，文件仅包含目标 HTTPS Webhook URL，再在 `plugins.configs.quota-guard.notification_webhook_file` 设置其绝对路径。示例用编辑器输入，不把地址写入命令历史：
+
+```bash
+sudo test -e /var/lib/cliproxyapi/quota-guard/notification-webhook.url || sudo install -o cliproxyapi -g cliproxyapi -m 600 /dev/null /var/lib/cliproxyapi/quota-guard/notification-webhook.url
+sudoedit /var/lib/cliproxyapi/quota-guard/notification-webhook.url
+```
+
+```yaml
+notification_webhook_file: /var/lib/cliproxyapi/quota-guard/notification-webhook.url
+```
+
+该配置属于启动配置，应用后需受控重启 CPA；安装器不会创建地址文件或自动启用通知。文件必须为服务用户可读的普通文件、0600；HTTPS 为生产要求，回环 HTTP 仅供隔离测试。URL 不出现在状态、执行记录或错误中。
+
+插件发送通用 JSON POST：`kind`、`account_fingerprint`（账号标识摘要）、可选 `operation_id`、固定脱敏 `message`、`version` 和 `at`。不发送账号名称、邮箱、token、原始上游响应或 Webhook URL。接收端需支持该 JSON 格式，其他聊天机器人协议需通过自己的转换服务。
+
+发送最多等待 3 秒，不跟随重定向、不使用环境代理；成功事件按同类账号/operation 抑制 30 分钟，失败从 30 秒起指数退避并加入抖动，每轮限制通知数量。通知健康显示在 `notifications`，发送失败不改变额度策略。重启会清空内存通知去重状态，通知不是持久化消息队列，也不保证至少一次投递。

@@ -25,6 +25,7 @@ class PackageTests(unittest.TestCase):
         (self.root / "dist/quota-guard.so").write_bytes(self.library)
         (self.root / "dist/quota-guard.h").write_text("/* public header */\n")
         (self.root / "dist/SHA256SUMS").write_text(release.sha256(self.library) + "  dist/quota-guard.so\n")
+        (self.root / "dist/BUILD.json").write_text(json.dumps({"version": "0.2.1", "sha256": release.sha256(self.library)}))
         self.output = Path(self.tmp.name) / "release"
 
     def test_private_state_and_generated_reports_are_excluded(self):
@@ -53,7 +54,12 @@ class PackageTests(unittest.TestCase):
         outside = Path(self.tmp.name) / "private.txt"
         outside.write_text("private outside repository")
         (self.root / "README.md").unlink()
-        (self.root / "README.md").symlink_to(outside)
+        try:
+            (self.root / "README.md").symlink_to(outside)
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows account cannot create symlinks; Linux CI exercises this check")
+            raise
         with self.assertRaisesRegex(ValueError, "Symlink"):
             release.package(self.root, self.output)
 

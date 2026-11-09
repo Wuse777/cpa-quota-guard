@@ -15,7 +15,7 @@ import (
 func defaultPolicy() policy {
 	return policy{Revision: 1, Mode: "observe", PollSeconds: 60, MaxAgeSeconds: 180,
 		TimeoutSeconds: 15, SafetyPercent: 3, ResumeGapPercent: 5, UnknownAction: "block",
-		Strategy: "round-robin", Rules: []rule{}, AutoReset: resetPolicy{Enabled: true, BeforeHours: 6, Accounts: map[string]bool{}}}
+		Strategy: "round-robin", Rules: []rule{}, AutoReset: resetPolicy{Enabled: false, IncludeNewAccounts: false, BeforeHours: 6, Accounts: map[string]bool{}}}
 }
 
 func validatePolicy(p policy) error {
@@ -101,6 +101,9 @@ func loadPolicy(dir string) (policy, error) {
 	if err != nil {
 		return p, err
 	}
+	// Existing files predate safe onboarding: omitted fields retain their legacy behavior.
+	p.AutoReset.Enabled = true
+	p.AutoReset.IncludeNewAccounts = true
 	if err = decodeJSON(raw, &p); err != nil {
 		return p, fmt.Errorf("policy.json 无效: %w", err)
 	}

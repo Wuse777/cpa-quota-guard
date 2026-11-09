@@ -1,8 +1,9 @@
-name: CI
+name: CI and release gate
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -10,8 +11,9 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  release-gate:
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     strategy:
       matrix:
         go: ['1.23.x', '1.27.3']
@@ -31,13 +33,64 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install -r requirements.txt
       - run: bash build.sh
-      - run: node --test tests/session_bridge.test.mjs
+      - run: node --test tests/session_bridge.test.mjs tests/ui-model.test.mjs
       - run: python -m unittest discover -s tests -p 'test_*.py' -v
-      - run: python3 scripts/package_release.py
-      - run: cd release && sha256sum -c SHA256SUMS
+      - name: Fetch version and SHA256 pinned public fixtures
+        if: matrix.go == '1.27.3'
+        run: python3 scripts/fetch_fixtures.py
+      - name: Real CPA isolated integration
+        if: matrix.go == '1.27.3'
+        run: python3 tests/integration.py --plugin dist/quota-guard.so --cpa "$PWD/test-results/fixtures/cli-proxy-api" --panel "$PWD/test-results/fixtures/management.html"
+      - name: Actual install, companion coexistence and verified rollback
+        if: matrix.go == '1.27.3'
+        run: python3 tests/install_integration.py --runtime process --plugin dist/quota-guard.so --cpa "$PWD/test-results/fixtures/cli-proxy-api" --panel "$PWD/test-results/fixtures/management.html"
+      - name: Real systemd installation and rollback
+        if: matrix.go == '1.27.3'
+        run: sudo "$(command -v python3)" tests/install_integration.py --runtime systemd --report test-results/install-systemd-report.json --plugin dist/quota-guard.so --cpa "$PWD/test-results/fixtures/cli-proxy-api" --panel "$PWD/test-results/fixtures/management.html"
+      - name: Install browser dependencies
+        if: matrix.go == '1.27.3'
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Browser regression with synthetic accounts
+        if: matrix.go == '1.27.3'
+        run: node tests/browser-regression.mjs
+      - name: Real CPAMC login, bridge and iframe smoke
+        if: matrix.go == '1.27.3'
+        run: |
+          python3 tests/integration.py --plugin dist/quota-guard.so --cpa "$PWD/test-results/fixtures/cli-proxy-api" --panel "$PWD/test-results/fixtures/management.html" --serve > test-results/browser-fixture.log 2>&1 &
+          fixture_pid=$!
+          trap 'kill "$fixture_pid" 2>/dev/null || true' EXIT
+          fixture_ready=false
+          for attempt in $(seq 1 240); do
+            if rg --quiet BROWSER_FIXTURE_READY test-results/browser-fixture.log && curl --fail --silent http://127.0.0.1:18317/management.html > /dev/null; then fixture_ready=true; break; fi
+            if ! kill -0 "$fixture_pid" 2>/dev/null; then cat test-results/browser-fixture.log; exit 1; fi
+            sleep 1
+          done
+          if [ "$fixture_ready" != true ]; then cat test-results/browser-fixture.log; exit 1; fi
+          node tests/browser-regression.mjs --url http://127.0.0.1:18317/management.html --key quota-guard-integration-only
+      - name: Package only after verification
+        run: |
+          python3 scripts/package_release.py
+          cd release
+          sha256sum -c SHA256SUMS
+      - name: Require release tag to match source version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 -c 'import json,os; assert "v"+json.load(open("dist/BUILD.json"))["version"] == os.environ["RELEASE_TAG"]'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: matrix.go == '1.27.3' && github.event_name != 'pull_request'
+        if: matrix.go == '1.27.3'
         with:
           name: cpa-quota-guard-linux-amd64
           path: release/
           if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && matrix.go == '1.27.3'
+        with:
+          name: isolated-test-evidence
+          path: |
+            test-results/*report.json
+            test-results/browser-fixture.log
+            test-results/browser/
+          if-no-files-found: ignore

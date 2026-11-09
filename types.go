@@ -8,15 +8,19 @@ import (
 )
 
 const pluginID = "quota-guard"
-const version = "0.2.2"
+const version = "0.3.0"
+
+var buildCommit = "unknown"
+var buildTime = "unknown"
 
 type hostCall func(string, any, any) error
 
 type runtimeConfig struct {
-	StateDir          string `yaml:"state_dir"`
-	ProxyURL          string `yaml:"proxy_url"`
-	ManagementURL     string `yaml:"management_url"`
-	ManagementKeyFile string `yaml:"management_key_file"`
+	StateDir                string `yaml:"state_dir"`
+	ProxyURL                string `yaml:"proxy_url"`
+	ManagementURL           string `yaml:"management_url"`
+	ManagementKeyFile       string `yaml:"management_key_file"`
+	NotificationWebhookFile string `yaml:"notification_webhook_file"`
 	// Used only by the isolated integration harness; restricted to loopback HTTP.
 	TestProbeBase string `yaml:"test_probe_base"`
 }
@@ -36,9 +40,10 @@ type policy struct {
 }
 
 type resetPolicy struct {
-	Enabled     bool            `json:"enabled"`
-	BeforeHours float64         `json:"before_hours"`
-	Accounts    map[string]bool `json:"accounts"`
+	Enabled            bool            `json:"enabled"`
+	IncludeNewAccounts bool            `json:"include_new_accounts"`
+	BeforeHours        float64         `json:"before_hours"`
+	Accounts           map[string]bool `json:"accounts"`
 }
 
 type rule struct {
@@ -83,8 +88,11 @@ type decision struct {
 type accountStatus struct {
 	snapshot
 	decision
-	WouldBlock bool                `json:"would_block"`
-	Reset      *resetAccountStatus `json:"reset,omitempty"`
+	WouldBlock    bool                `json:"would_block"`
+	Reset         *resetAccountStatus `json:"reset,omitempty"`
+	Health        string              `json:"health"`
+	EffectiveRule *rule               `json:"effective_rule"`
+	Warnings      []string            `json:"warnings"`
 }
 
 type candidate struct {

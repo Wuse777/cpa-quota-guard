@@ -11,3 +11,7 @@ plugins:
       proxy_url: ""  # Empty means direct; the installer inherits CPA requests.proxy-url.
       management_url: "http://127.0.0.1:8317"  # Same CPA API used by CPAMC's manual reset.
       management_key_file: /var/lib/cliproxyapi/quota-guard/cpa-management.key  # 0600, service user owned.
+
+      # Optional: service-owned 0600 file containing an HTTP(S) webhook URL.
+      # Omit to disable notifications; URL is never returned by the status API.
+      notification_webhook_file: ""

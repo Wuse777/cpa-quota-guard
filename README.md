@@ -41,8 +41,8 @@
 
 ```bash
 sha256sum -c SHA256SUMS
-tar -xzf cpa-quota-guard_0.4.0_linux_amd64.tar.gz
-cd cpa-quota-guard-0.4.0
+tar -xzf cpa-quota-guard_0.4.1_linux_amd64.tar.gz
+cd cpa-quota-guard-0.4.1
 sha256sum -c dist/SHA256SUMS
 
 # 安装器需要 Python 的 yaml 模块；Debian / Ubuntu 可使用发行版软件包。

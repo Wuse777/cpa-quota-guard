@@ -112,7 +112,7 @@ def main():
         output = run(*command, '--apply')
         assert 'INSTALL service active' in output and 'BACKUP ' in output
         status = get('/v0/management/plugins/quota-guard/status')
-        assert status['version'] == '0.4.0' and status['policy']['mode'] == 'observe'
+        assert status['version'] == '0.4.1' and status['policy']['mode'] == 'observe'
         assert not status['policy']['auto_reset']['enabled']
         assert not status['policy']['auto_reset']['include_new_accounts']
         assert not status['policy']['auto_activate']['enabled']

@@ -84,6 +84,9 @@ class Probe(http.server.BaseHTTPRequestHandler):
                 for window in data["rate_limit"].values():
                     if window.pop("fixture_recover", False) and time.time() >= window["reset_at"]:
                         window["used_percent"] = 0
+                        window["reset_at"] = int(time.time()) + window["limit_window_seconds"]
+                    if window.pop("fixture_drift", False):
+                        window["reset_at"] = int(time.time()) + window["limit_window_seconds"]
             if name in missing_primary:
                 data["rate_limit"].pop("primary_window")
         self.wfile.write(json.dumps(data).encode())
@@ -101,6 +104,7 @@ class Probe(http.server.BaseHTTPRequestHandler):
                 if window["used_percent"] == 0 or window.get("fixture_recover") and time.time() >= window["reset_at"]:
                     window.update(used_percent=0.001, reset_at=int(time.time()) + window["limit_window_seconds"])
                     window.pop("fixture_recover", None)
+                    window.pop("fixture_drift", None)
             response = {"id": "activation_local", "status": "completed", "model": payload["model"],
                         "usage": {"input_tokens": 8, "output_tokens": 1, "total_tokens": 9},
                         "output": [{"type": "message", "role": "assistant", "content": [
@@ -500,13 +504,23 @@ def main():
             event = activation(snapshot, name).get("last_result") or {}
             return event if event.get("state") == "succeeded" else {}
 
-        activation_windows["a.json"] = {"primary_window": window(18000, 0),
-                                           "secondary_window": window(604800, 0)}
+        # Full future timestamps are initially ambiguous; subsequent movement
+        # identifies unstarted windows, and preflight must preserve that cycle.
+        activation_windows["a.json"] = {"primary_window": window(18000, 0, int(time.time()) + 18000),
+                                           "secondary_window": window(604800, 0, int(time.time()) + 604800)}
+        refresh()
+        wait_for(lambda s: any(a["account"]["name"] == "a.json" and
+                              a["buckets"][0]["remaining_percent"] == 100 for a in s["accounts"]))
         p = status()["policy"]
         p["auto_reset"]["enabled"] = False
         p["auto_activate"].update(enabled=True, accounts={"a.json": True, "b.json": False},
-                                  include_new_accounts=False, model="")
+                                  include_new_accounts=False, model="", reset=False)
         save(p)
+        refresh()
+        wait_for(lambda s: not s["health"]["quota_refreshing"] and activation(s).get("models"))
+        check("full fixed future timers do not trigger on their first observation", not activation_calls)
+        for value in activation_windows["a.json"].values():
+            value["reset_at"] += 60
         refresh()
         s = wait_for(lambda s: last_success(s))
         check("two idle quota windows merge into one fixed-account activation",
@@ -543,11 +557,14 @@ def main():
 
         activation_windows["a.json"] = {"primary_window": window(18000, 20, int(time.time()) + 1000),
                                            "secondary_window": window(604800, 20, int(time.time()) + 10000)}
+        p = status()["policy"]
+        p["auto_activate"]["reset"] = True
+        save(p)
         refresh()
         wait_for(lambda s: any(a["account"]["name"] == "a.json" and
                               a["buckets"][0]["remaining_percent"] == 80 for a in s["accounts"]))
-        activation_windows["a.json"] = {"primary_window": window(18000, 0),
-                                           "secondary_window": window(604800, 0)}
+        activation_windows["a.json"] = {"primary_window": window(18000, 0, int(time.time()) + 18000),
+                                           "secondary_window": window(604800, 0, int(time.time()) + 604800)}
         refresh()
         s = wait_for(lambda s: len(activation_calls) == 3 and last_success(s))
         check("manual reset quota changes activate both windows once", len(last_success(s)["windows"]) == 2)
@@ -573,10 +590,15 @@ def main():
         wait_for(lambda s: any(a["account"]["name"] == "a.json" and
                               a["buckets"][0]["remaining_percent"] == 80 for a in s["accounts"]))
         activation_failure = True
-        activation_windows["a.json"] = {"primary_window": window(18000, 0),
-                                           "secondary_window": window(604800, 0)}
+        activation_windows["a.json"] = {"primary_window": window(18000, 0, int(time.time()) + 18000),
+                                           "secondary_window": window(604800, 0, int(time.time()) + 604800)}
+        for value in activation_windows["a.json"].values():
+            value["fixture_drift"] = True
         refresh()
         s = wait_for(lambda s: len(activation_calls) == 5 and activation(s).get("state") == "uncertain")
+        for value in activation_windows["a.json"].values():
+            value.pop("fixture_drift", None)
+            value["reset_at"] += 120
         refresh()
         proc.terminate()
         proc.wait(timeout=15)

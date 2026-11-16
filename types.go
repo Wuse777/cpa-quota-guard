@@ -8,7 +8,7 @@ import (
 )
 
 const pluginID = "quota-guard"
-const version = "0.4.0"
+const version = "0.4.1"
 
 var buildCommit = "unknown"
 var buildTime = "unknown"

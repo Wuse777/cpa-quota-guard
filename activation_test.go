@@ -38,10 +38,181 @@ func activationFinishTest(e *engine, id, state string, at time.Time) {
 	op.State = state
 	op.At = at
 	e.activationJournal.Operations[op.ID] = op
+	settleActivationWindows(s, op)
 	s.Pending = ""
 	for k, w := range s.Windows {
 		w.Handled = true
 		s.Windows[k] = w
+	}
+}
+
+func TestActivationNaturalRefreshWithFutureResetTime(t *testing.T) {
+	for _, seconds := range []int64{18000, 604800} {
+		t.Run(fmtInt(seconds), func(t *testing.T) {
+			e, p, a, id, now := activationCoreFixture(t)
+			deadline := now.Add(4 * time.Second)
+			b := activationWindowTest(seconds, 0, deadline)
+			activationObserveTest(e, p, a, id, now, b)
+			at := deadline.Add(time.Second)
+			b.RemainingPercent = 100
+			b.ResetAt = at.Add(time.Duration(seconds) * time.Second)
+			activationObserveTest(e, p, a, id, at, b)
+			op := activationPendingTest(t, e, id)
+			if op.Cycles[activationKind(b)] != "natural:"+fmtInt(deadline.Unix()) {
+				t.Fatalf("future reset hid natural refresh: %+v", op)
+			}
+			b.ResetAt = b.ResetAt.Add(time.Minute)
+			activationObserveTest(e, p, a, id, at.Add(time.Minute), b)
+			if activationPendingTest(t, e, id).ID != op.ID {
+				t.Fatal("preflight drift must preserve pending cycle")
+			}
+		})
+	}
+}
+
+func TestActivationManualRefreshWithChangedFutureResetTime(t *testing.T) {
+	e, p, a, id, now := activationCoreFixture(t)
+	b := activationWindowTest(18000, 20, now.Add(time.Hour))
+	activationObserveTest(e, p, a, id, now, b)
+	b.RemainingPercent = 100
+	activationObserveTest(e, p, a, id, now.Add(time.Second), b)
+	if e.activationJournal.Identities[id].Pending != "" {
+		t.Fatal("rounding to full with unchanged active timer is not a reset")
+	}
+	// Consumption evidence must survive intermediate snapshots rounded to full.
+	b.ResetAt = now.Add(5 * time.Hour)
+	activationObserveTest(e, p, a, id, now.Add(3*time.Second), b)
+	op := activationPendingTest(t, e, id)
+	if op.Cycles["five_hour"] != "observed-reset:"+fmtInt(now.Add(time.Hour).Unix()) {
+		t.Fatalf("future reset hid manual refresh: %+v", op)
+	}
+}
+
+func TestActivationInitialFullFutureDriftAndTerminalDedup(t *testing.T) {
+	for _, state := range []string{"succeeded", "uncertain"} {
+		t.Run(state, func(t *testing.T) {
+			e, p, a, id, now := activationCoreFixture(t)
+			b := activationWindowTest(18000, 100, now.Add(5*time.Hour))
+			activationObserveTest(e, p, a, id, now, b)
+			if e.activationJournal.Identities[id].Pending != "" {
+				t.Fatal("first future timer alone is insufficient")
+			}
+			// Compare accumulated drift against the anchor, not only the last query.
+			for i := 1; i <= 3; i++ {
+				b.ResetAt = now.Add(5*time.Hour + time.Duration(i*2)*time.Second)
+				activationObserveTest(e, p, a, id, now.Add(time.Duration(i*2)*time.Second), b)
+			}
+			op := activationPendingTest(t, e, id)
+			activationFinishTest(e, id, state, now.Add(7*time.Second))
+			if err := writeActivationJournal(e.cfg.StateDir, e.activationJournal); err != nil {
+				t.Fatal(err)
+			}
+			j, err := loadActivationJournal(e.cfg.StateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.activationJournal = j
+			for i := 1; i <= 20; i++ {
+				at := now.Add(time.Duration(i) * time.Minute)
+				b.ResetAt = at.Add(5 * time.Hour)
+				activationObserveTest(e, p, a, id, at, b)
+				if e.activationJournal.Identities[id].Pending != "" {
+					t.Fatal("placeholder drift repeated sent request")
+				}
+			}
+			w := e.activationJournal.Identities[id].Windows["five_hour"]
+			if len(e.activationJournal.Operations) != 1 || e.activationJournal.Operations[op.ID].Confirmed {
+				t.Fatal("future placeholder must neither repeat nor confirm the call")
+			}
+			// Even tiny successful calls may round to 100%; the next real boundary
+			// must remain scheduled without requiring visible percentage consumption.
+			at := w.ActiveUntil.Add(time.Second)
+			b.ResetAt = at.Add(5 * time.Hour)
+			activationObserveTest(e, p, a, id, at, b)
+			next := activationPendingTest(t, e, id)
+			if next.ID == op.ID || next.Cycles["five_hour"] != "natural:"+fmtInt(w.ActiveUntil.Unix()) {
+				t.Fatal("rounded full usage lost the next natural boundary")
+			}
+		})
+	}
+}
+
+func TestActivationFixedFullFutureAndJitterAreNotIdleEvidence(t *testing.T) {
+	e, p, a, id, now := activationCoreFixture(t)
+	b := activationWindowTest(18000, 100, now.Add(time.Hour))
+	activationObserveTest(e, p, a, id, now, b)
+	for i := 1; i < 10; i++ {
+		b.ResetAt = now.Add(time.Hour + time.Duration(i%3)*time.Second)
+		activationObserveTest(e, p, a, id, now.Add(time.Duration(i)*time.Minute), b)
+		if e.activationJournal.Identities[id].Pending != "" {
+			t.Fatal("stable full timer is already active")
+		}
+	}
+}
+
+func TestActivationResetSignalAcceptsFullFutureTimer(t *testing.T) {
+	e, p, a, id, now := activationCoreFixture(t)
+	p.Natural = false
+	e.markActivationReset(id, "future-card", now)
+	b := activationWindowTest(604800, 100, now.Add(7*24*time.Hour))
+	activationObserveTest(e, p, a, id, now.Add(time.Second), b)
+	if activationPendingTest(t, e, id).Cycles["weekly"] != "reset:future-card" {
+		t.Fatal("explicit reset with future timer was ignored")
+	}
+}
+
+func TestActivationSentRequestStartsUnselectedFullWindow(t *testing.T) {
+	e, p, a, id, now := activationCoreFixture(t)
+	p.FiveHour = false
+	b := activationWindowTest(18000, 100, now.Add(5*time.Hour))
+	w := activationWindowTest(604800, 100, time.Time{})
+	activationObserveTest(e, p, a, id, now, b, w)
+	activationFinishTest(e, id, "succeeded", now.Add(time.Second))
+	p.FiveHour = true
+	b.ResetAt = now.Add(5*time.Hour + time.Minute)
+	w.ResetAt = now.Add(7 * 24 * time.Hour)
+	activationObserveTest(e, p, a, id, now.Add(time.Minute), b, w)
+	b.ResetAt = b.ResetAt.Add(time.Minute)
+	activationObserveTest(e, p, a, id, now.Add(2*time.Minute), b, w)
+	if e.activationJournal.Identities[id].Pending != "" {
+		t.Fatal("one request starts all full windows")
+	}
+}
+
+func TestActivationFutureRefreshRespectsSourceSwitches(t *testing.T) {
+	for _, natural := range []bool{false, true} {
+		e, p, a, id, now := activationCoreFixture(t)
+		deadline := now.Add(time.Hour)
+		b := activationWindowTest(18000, 20, deadline)
+		activationObserveTest(e, p, a, id, now, b)
+		p.Natural = !natural
+		p.Reset = natural
+		at := now.Add(time.Minute)
+		if natural {
+			at = deadline.Add(time.Second)
+		}
+		b.RemainingPercent = 100
+		b.ResetAt = at.Add(5 * time.Hour)
+		activationObserveTest(e, p, a, id, at, b)
+		if e.activationJournal.Identities[id].Pending != "" {
+			t.Fatal("disabled source must not be relabeled as the other source")
+		}
+	}
+}
+
+func TestActivationFutureDriftDoesNotChangeNoSendRetry(t *testing.T) {
+	e, p, a, id, now := activationCoreFixture(t)
+	b := activationWindowTest(18000, 100, now.Add(5*time.Hour))
+	activationObserveTest(e, p, a, id, now, b)
+	b.ResetAt = b.ResetAt.Add(time.Minute)
+	activationObserveTest(e, p, a, id, now.Add(time.Minute), b)
+	op := activationPendingTest(t, e, id)
+	op.State, op.NoSend, op.RetryAt = "failed", true, now.Add(6*time.Minute)
+	e.activationJournal.Operations[op.ID] = op
+	b.ResetAt = b.ResetAt.Add(time.Minute)
+	activationObserveTest(e, p, a, id, now.Add(2*time.Minute), b)
+	if retry := activationPendingTest(t, e, id); retry.ID != op.ID || !retry.RetryAt.Equal(op.RetryAt) {
+		t.Fatal("drift bypassed preflight backoff")
 	}
 }
 

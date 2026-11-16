@@ -111,13 +111,15 @@ type activationAccountStatus struct {
 	Models     []activationModel `json:"models"`
 }
 type activationWindow struct {
-	Bucket      bucket    `json:"bucket"`
-	CheckedAt   time.Time `json:"checked_at"`
-	Cycle       string    `json:"cycle"`
-	Handled     bool      `json:"handled"`
-	Boundary    int64     `json:"boundary"`
-	ActiveUntil time.Time `json:"active_until,omitempty"`
-	Reason      string    `json:"reason"`
+	Bucket        bucket    `json:"bucket"`
+	CheckedAt     time.Time `json:"checked_at"`
+	Cycle         string    `json:"cycle"`
+	Handled       bool      `json:"handled"`
+	Boundary      int64     `json:"boundary"`
+	ActiveUntil   time.Time `json:"active_until,omitempty"`
+	AwaitingClock bool      `json:"awaiting_clock,omitempty"`
+	ObservedUse   bool      `json:"observed_use,omitempty"`
+	Reason        string    `json:"reason"`
 }
 type activationIdentity struct {
 	Windows       map[string]activationWindow `json:"windows"`
@@ -185,6 +187,7 @@ func loadActivationJournal(dir string) (activationJournal, error) {
 			op.State = "uncertain"
 			op.At = time.Now()
 			op.Error = "上次进程在请求途中结束；可能已执行，不再自动重发"
+			settleActivationWindows(j.Identities[op.Identity], op)
 			j.Operations[id] = op
 			j.Events = append(j.Events, op.activationEvent)
 		}
@@ -294,7 +297,52 @@ func activationCycleSelected(p activationPolicy, k, cycle string) bool {
 	return p.Natural
 }
 func activationIdle(b bucket, now time.Time) bool {
-	return b.RemainingPercent >= 99.999999 && (b.ResetAt.IsZero() || !b.ResetAt.After(now))
+	return b.RemainingPercent >= 99.999999
+}
+
+func activationClockChanged(a, b time.Time) bool {
+	return a.Sub(b) > 5*time.Second || b.Sub(a) > 5*time.Second
+}
+
+// A sent request can start every full window, including an unselected one.
+// Keep one fallback deadline if reporting fails or continues to return a moving
+// placeholder. Only the first subsequent snapshot may replace that deadline.
+func settleActivationWindows(st *activationIdentity, op activationOperation) {
+	if op.NoSend {
+		return
+	}
+	for k, w := range st.Windows {
+		if activationIdle(w.Bucket, op.At) {
+			w.ObservedUse = false
+			if w.ActiveUntil.IsZero() || !w.ActiveUntil.After(op.At) || w.Boundary == w.ActiveUntil.Unix() {
+				w.ActiveUntil = op.At.Add(time.Duration(w.Bucket.WindowSeconds) * time.Second)
+			}
+			w.AwaitingClock = true
+			if _, selected := op.Cycles[k]; !selected {
+				w.Cycle = "started:" + op.ID
+			}
+			w.Handled = true
+		} else if w.Cycle == op.Cycles[k] {
+			w.Handled = true
+		}
+		st.Windows[k] = w
+	}
+}
+
+func activationClockConfirmed(w activationWindow, op activationOperation, now time.Time) bool {
+	// A future reset time alone can be an idle placeholder, even after a call.
+	return w.Cycle == op.Cycles[activationKind(w.Bucket)] && w.CheckedAt.After(op.At) &&
+		w.Bucket.ResetAt.After(now) && !activationIdle(w.Bucket, now)
+}
+
+func (e *engine) activationCycleSentLocked(identity, kind, cycle string) bool {
+	for _, op := range e.activationJournal.Operations {
+		if op.Identity == identity && op.Cycles[kind] == cycle && !op.NoSend &&
+			(op.State == "sending" || op.State == "succeeded" || op.State == "uncertain" || op.State == "failed") {
+			return true
+		}
+	}
+	return false
 }
 func activationHash(s string) string {
 	sum := sha256.Sum256([]byte(s))
@@ -371,29 +419,50 @@ func (e *engine) observeActivationLocked(identity string, s snapshot, p activati
 			continue
 		}
 		idle := activationIdle(b, now)
+		if exists && !activationIdle(w.Bucket, now) {
+			w.ObservedUse = true // Migrate evidence from pre-0.4.1 journals too.
+		}
+		settling := w.AwaitingClock
+		if settling {
+			if b.ResetAt.After(now) && (w.Boundary == 0 || activationClockChanged(b.ResetAt, time.Unix(w.Boundary, 0))) {
+				w.ActiveUntil = b.ResetAt
+			}
+			w.AwaitingClock = false
+		}
 		if !exists {
 			w = activationWindow{Cycle: "initial:" + k, Handled: true}
-			if idle && p.Natural && activationSelected(p, k) {
+			if idle && !b.ResetAt.After(now) && p.Natural && activationSelected(p, k) {
 				w.Handled = false
 				w.Reason = "首次启用时窗口满额且尚未启动"
 			}
 		}
-		if exists && idle {
+		if exists && idle && !settling {
 			old := w.Bucket
 			boundary := w.ActiveUntil.Unix()
 			natural := !w.ActiveUntil.IsZero() && !w.ActiveUntil.After(now) && w.Boundary != boundary
-			manual := old.RemainingPercent < 99.999999 || old.ResetAt.After(now)
+			changed := activationClockChanged(b.ResetAt, w.ActiveUntil)
+			manual := w.ObservedUse && changed
+			initialMoved := w.Cycle == "initial:"+k && activationIdle(old, now) &&
+				!w.ObservedUse && !w.ActiveUntil.IsZero() && changed && !e.activationCycleSentLocked(identity, k, w.Cycle)
 			if natural && p.Natural {
 				w.Cycle = "natural:" + fmt.Sprint(boundary)
 				w.Handled = false
 				w.Reason = "自然额度刷新后的窗口激活"
 				w.Boundary = boundary
-			} else if manual && p.Reset {
+				w.ObservedUse = false
+			} else if !natural && initialMoved && p.Natural {
+				// Full future timers that move with queries are not evidence of use.
+				// Reuse the initial cycle so drift and restarts cannot cause repeats.
+				w.Handled = false
+				w.Reason = "满额窗口未来重置时间变化，激活尚未启动的周期"
+				w.Boundary = boundary
+			} else if !natural && manual && p.Reset {
 				// An observed used-to-full transition before expiry is an external/manual reset.
 				if old.ResetAt.IsZero() || old.ResetAt.After(now) {
 					w.Cycle = "observed-reset:" + fmt.Sprint(w.ActiveUntil.Unix())
 					w.Handled = false
 					w.Reason = "检测到手动重置后的满额窗口"
+					w.ObservedUse = false
 					if !w.ActiveUntil.IsZero() {
 						w.Boundary = w.ActiveUntil.Unix()
 					}
@@ -401,6 +470,7 @@ func (e *engine) observeActivationLocked(identity string, s snapshot, p activati
 			}
 		}
 		if resetReady && idle {
+			w.ObservedUse = false
 			w.Cycle = "reset:" + st.ResetSignal
 			w.Handled = false
 			w.Reason = "重置卡使用成功后的窗口激活"
@@ -409,10 +479,14 @@ func (e *engine) observeActivationLocked(identity string, s snapshot, p activati
 			}
 		}
 		if !idle {
+			w.ObservedUse = true
 			w.Handled = true // Business traffic already started the new window.
-			if b.ResetAt.After(now) && (w.ActiveUntil.IsZero() || b.ResetAt.Sub(w.ActiveUntil) > 5*time.Second || w.ActiveUntil.Sub(b.ResetAt) > 5*time.Second) {
+			if b.ResetAt.After(now) && (w.ActiveUntil.IsZero() || activationClockChanged(b.ResetAt, w.ActiveUntil)) {
 				w.ActiveUntil = b.ResetAt
 			}
+		} else if w.ActiveUntil.IsZero() && b.ResetAt.After(now) {
+			// Anchor the first full future timer; never chase its query-time drift.
+			w.ActiveUntil = b.ResetAt
 		}
 		w.Bucket = b
 		w.CheckedAt = s.CheckedAt
@@ -429,7 +503,7 @@ func (e *engine) observeActivationLocked(identity string, s snapshot, p activati
 		confirmed := true
 		for _, k := range op.Windows {
 			w, ok := st.Windows[k]
-			if !ok || !w.CheckedAt.After(op.At) || !w.Bucket.ResetAt.After(now) {
+			if !ok || !activationClockConfirmed(w, op, now) {
 				confirmed = false
 			}
 		}
@@ -963,6 +1037,7 @@ func (e *engine) processActivation(ctx context.Context, p policy, cfg runtimeCon
 		}
 	}
 	if !op.NoSend {
+		settleActivationWindows(st, op)
 		st.Pending = ""
 	}
 	e.activationJournal.Events = append(e.activationJournal.Events, op.activationEvent)
@@ -972,31 +1047,6 @@ func (e *engine) processActivation(ctx context.Context, p policy, cfg runtimeCon
 	if op.State == "succeeded" {
 		// Read the resulting clocks for the UI; a successful request is never
 		// retried merely because quota reporting is delayed.
-		post, probeErr := e.activationFreshQuota(ctx, cfg, p, a)
-		if probeErr == nil {
-			confirmed := true
-			for _, k := range op.Windows {
-				found := false
-				for _, b := range post.Buckets {
-					if activationKind(b) == k && b.ResetAt.After(time.Now()) {
-						found = true
-					}
-				}
-				confirmed = confirmed && found
-			}
-			if confirmed {
-				e.activationMu.Lock()
-				latest := e.activationJournal.Operations[op.ID]
-				latest.Confirmed = true
-				e.activationJournal.Operations[op.ID] = latest
-				for i := range e.activationJournal.Events {
-					if e.activationJournal.Events[i].ID == op.ID {
-						e.activationJournal.Events[i].Confirmed = true
-					}
-				}
-				_ = e.commitActivationLocked()
-				e.activationMu.Unlock()
-			}
-		}
+		_, _ = e.activationFreshQuota(ctx, cfg, p, a)
 	}
 }

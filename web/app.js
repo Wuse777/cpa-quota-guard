@@ -9,6 +9,7 @@
   const healthLabels = {healthy:'查询正常',stale:'额度已过期',error:'查询失败',unknown:'额度未知',disabled:'账号停用',unsupported:'尚未适配'};
   const schedulerLabels = {disabled:'未启用',waiting:'等待使用窗口',ready:'已进入窗口',retry_wait:'等待重试',verifying:'正在核实',blocked:'排程已暂停',no_credits:'暂无卡片',error:'查询异常'};
   const eventLabels = {pending:'等待核实',confirmed:'重置已确认',success:'核实完成',deferred:'延后重试',expired:'目标卡已到期',mismatch:'账号已暂停'};
+  const activationLabels = {pending:'等待激活',verifying:'核实额度',sending:'正在调用',succeeded:'调用成功',confirmed:'计时已确认',activated:'计时已确认',uncertain:'结果待核实',skipped:'已跳过',failed:'调用失败',disabled:'未启用',waiting:'等待额度刷新',blocked:'暂缓激活'};
   let state, basePolicy, draft, dirty=false, connected=false, loading=false, saving=false, discarding=false, serial=0, receivedAt;
   const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const remaining = value => {
@@ -81,6 +82,12 @@
     return rule;
   }
   const autoKey=account => M.keys(account).find(key => Object.hasOwn(draft.auto_reset.accounts,key)) || account.name || account.id;
+  const activationKey=(account,field='accounts') => M.keys(account).find(key => Object.hasOwn(draft.auto_activate[field],key)) || account.name || account.id;
+  const activationLabel=result => result?.confirmed===true?'计时已确认':activationLabels[result?.state]||result?.state||'等待额度刷新';
+  const activationUsage=result => Number.isFinite(result?.input_tokens)||Number.isFinite(result?.output_tokens)?`输入 ${Number(result.input_tokens)||0} · 输出 ${Number(result.output_tokens)||0} token`:'未返回 token 用量';
+  const activationWindows=result => (result?.windows||[]).map(M.activationWindow).join('、');
+  const activationDetails=result => [activationWindows(result),result?.model,result?.reasoning?`思考 ${result.reasoning}`:'',activationUsage(result)].filter(Boolean).join(' · ');
+  const activationGood=result => result?.confirmed===true||['succeeded','confirmed','activated'].includes(result?.state);
   function syncInput(input,value) {if(input===document.activeElement)return;if(input.type==='checkbox')input.checked=!!value;else if(input.value!==String(value))input.value=value;}
   function updateDraftStatus() {
     if(!draft)return;
@@ -114,7 +121,7 @@
     const history=accounts.filter(a => !a.account.disabled && a.reset?.last_result?.error).sort((a,b) => Date.parse(b.reset.last_result.at)-Date.parse(a.reset.last_result.at));
     $('history-warning').hidden=!history.length;
     if(history.length){const last=history[0];$('history-warning').textContent=`上次兑换异常 · ${date(last.reset.last_result.at)} · ${last.account.name}。历史记录保留，当前排程单独显示。`;}
-    const warnings=[state.refresh_error,state.reset_error,p.mode==='enforce' && !s.effectiveRules?'执行模式尚无生效账号规则，请在账号卡片启用额度保护。':''].filter(Boolean);
+    const warnings=[state.refresh_error,state.reset_error,state.activation_error,p.mode==='enforce' && !s.effectiveRules?'执行模式尚无生效账号规则，请在账号卡片启用额度保护。':''].filter(Boolean);
     $('runtime-warning').hidden=!warnings.length;$('runtime-warning').textContent=warnings.join(' ');
     $('updated-at').textContent=`状态更新 ${date(receivedAt)}`;
     $('version-label').textContent=`QUOTA GUARD / ${state.version}`;
@@ -133,28 +140,43 @@
     const cards=M.liveCredits(s).map((c,i) => {const at=new Date(Date.parse(c.expires_at)-state.policy.auto_reset.before_hours*3600000).toISOString();return `<div class="credit" data-key="${esc(c.id||i)}"><div class="credit-row"><strong>重置卡 ${i+1}</strong><span class="badge">${a.disabled?'停用账号快照':M.actionable(s)?'已纳入排程':'未自动处理'}</span></div><small>到期 ${esc(date(c.expires_at))}</small><small>使用窗口 ${esc(date(at))}</small></div>`;}).join('');
     return `<div class="side-title">Codex 重置卡<label class="toggle"><input type="checkbox" data-edit="auto" ${M.autoEnabled(draft,a)?'checked':''} ${a.disabled?'disabled':''}><span class="toggle-track" aria-hidden="true"></span><span>此账号启用</span></label></div><div class="reset-current"><span class="badge ${['blocked','error'].includes(schedule)?'warn':M.actionable(s)?'good':''}">${schedulerLabels[schedule]||esc(schedule)}</span><p>${esc(r.blocked_reason||r.query_error||r.message||'等待后台检查')}</p>${M.validDate(r.next_at)&&M.actionable(s)?`<small>下一次 ${esc(date(r.next_at))}</small>`:''}</div>${history?.error?`<details class="history-detail"><summary>上次兑换异常 · ${esc(date(history.at))}</summary><p class="error">${esc(history.error)}</p><p class="meta">${esc(resultText(history))}</p><p class="hint">历史错误保留；是否暂停以当前排程状态为准。</p></details>`:''}${!draft.auto_reset.enabled?'<p class="hint">自动使用总开关已关闭；账号单独设置保留。</p>':''}${cards||'<div class="empty-inline">暂无未过期的重置卡快照</div>'}<p class="query-times">卡片上次成功查询 ${esc(date(r.checked_at))}</p>`;
   }
+  function activationMarkup(s) {
+    const a=s.account;if(a.provider!=='codex')return '';
+    const live=s.activation||{},r=live.last_result,modelKey=activationKey(a,'account_models'),ownModel=draft.auto_activate.account_models[modelKey]||'';
+    const listID=`activate-model-${encodeURIComponent(a.id)}`,models=live.models||[];
+    return `<section class="activation-side" aria-label="${esc(a.name)}自动激活"><div class="side-title">额度刷新后自动激活<label class="toggle"><input type="checkbox" data-edit="activate" ${M.activationEnabled(draft,a)?'checked':''} ${a.disabled?'disabled':''}><span class="toggle-track" aria-hidden="true"></span><span>此账号启用</span></label></div><div class="activation-current"><span class="badge ${['uncertain','failed','blocked'].includes(live.state)?'warn':activationGood(live)?'good':''}">${esc(activationLabel(live))}</span><p>${esc(live.message||'保存后等待后台检查额度周期')}</p>${M.validDate(live.next_at)?`<small>下次检查 ${esc(date(live.next_at))}</small>`:''}</div><label class="activation-model-label">此账号调用模型<input type="text" data-edit="activate-model" aria-label="${esc(a.name)}自动激活模型" list="${esc(listID)}" value="${esc(ownModel)}" maxlength="200" autocomplete="off" placeholder="${esc(draft.auto_activate.model?`沿用默认：${draft.auto_activate.model}`:'自动选择低消耗模型')}" ${a.disabled?'disabled':''}><datalist id="${esc(listID)}">${models.map(m=>`<option value="${esc(m.id)}">最低思考：${esc(m.lowest_effort||'自动')}</option>`).join('')}</datalist></label><p class="hint">${models.length?`已发现 ${models.length} 个可用模型。`:'可用模型由后台读取。'}留空沿用默认设置，思考程度固定为最低支持档。</p>${!draft.auto_activate.enabled?'<p class="hint">自动激活总开关已关闭；账号设置保留。</p>':''}${r?`<details class="history-detail activation-result"><summary>最近激活 · ${esc(activationLabel(r))} · ${esc(date(r.at))}</summary><p class="meta">${esc(activationDetails(r))}</p>${r.reason?`<p>${esc(r.reason)}</p>`:''}${r.error?`<p class="error">${esc(r.error)}</p>`:''}${r.state==='succeeded'&&r.confirmed!==true?'<p class="hint">模型调用已完成，计时启动状态以后台后续查询为准。</p>':''}</details>`:''}</section>`;
+  }
   function renderAccounts() {
     const accounts=state.accounts||[],p=state.policy,query=$('account-search').value.trim(),filter=$('account-filter').value;
-    const rank=s => s.account.disabled?3:['error','stale','unknown'].includes(M.health(s,p))||['blocked','error'].includes(M.scheduler(s))?0:1;
+    const rank=s => s.account.disabled?3:['error','stale','unknown'].includes(M.health(s,p))||['blocked','error'].includes(M.scheduler(s))||M.activationAttention(s)?0:1;
     let visible=accounts.filter(s => M.accountMatches(s,query,filter,p)).sort((a,b) => rank(a)-rank(b)||a.account.name.localeCompare(b.account.name));
     // Keep the active editor in place if a poll changes its health/sort rank.
     if($('accounts').contains(document.activeElement)){const order=[...$('accounts').children].map(n => n.dataset.key);visible.sort((a,b) => order.indexOf(a.account.id)-order.indexOf(b.account.id));}
     $('account-results').textContent=`显示 ${visible.length} / ${accounts.length} 个`;
     markup($('accounts'),visible.map(s => {
       const a=s.account,r=ruleFor(a),h=M.health(s,p),liveRule=M.ruleFor(p,a),status=a.disabled?'账号停用':s.would_block?(p.mode==='enforce'?'额度保护中':'观察：预计避让'):!liveRule?.enabled?'未启用保护':h==='healthy'?'额度充足':'额度待核实';
-      const changed=JSON.stringify(liveRule)!==JSON.stringify(r)||M.autoEnabled(p,a)!==M.autoEnabled(draft,a);
-      return `<details class="panel account ${a.disabled?'is-disabled':''}" data-key="${esc(a.id)}" data-account-id="${esc(a.id)}" ${a.disabled?'':'open'}><summary class="account-head"><div class="account-title"><span class="avatar" aria-hidden="true">${a.provider==='codex'?'⌘':'△'}</span><div><h3>${esc(a.name||a.id)}</h3><small>${esc(a.provider?.toUpperCase())} · ${a.disabled?'已停用':'已启用'}</small></div></div><div class="account-badges"><span class="badge ${h==='healthy'?'good':['error','stale','unknown'].includes(h)?'warn':''}">${healthLabels[h]||'额度未知'}</span><span class="badge ${s.would_block?'warn':''}">${status}</span>${changed?'<span class="badge draft-badge">有草稿</span>':''}<span class="chevron" aria-hidden="true">⌄</span></div></summary><fieldset class="account-fields" ${saving||discarding?'disabled':''}><legend class="sr-only">${esc(a.name)}策略</legend><div class="account-body"><div class="quota-side">${quotaMarkup(s,r)}</div><div class="reset-side">${resetMarkup(s)}</div></div></fieldset></details>`;
+      const changed=JSON.stringify(liveRule)!==JSON.stringify(r)||M.autoEnabled(p,a)!==M.autoEnabled(draft,a)||M.activationEnabled(p,a)!==M.activationEnabled(draft,a)||M.activationModelFor(p,a)!==M.activationModelFor(draft,a);
+      return `<details class="panel account ${a.disabled?'is-disabled':''}" data-key="${esc(a.id)}" data-account-id="${esc(a.id)}" ${a.disabled?'':'open'}><summary class="account-head"><div class="account-title"><span class="avatar" aria-hidden="true">${a.provider==='codex'?'⌘':'△'}</span><div><h3>${esc(a.name||a.id)}</h3><small>${esc(a.provider?.toUpperCase())} · ${a.disabled?'已停用':'已启用'}</small></div></div><div class="account-badges"><span class="badge ${h==='healthy'?'good':['error','stale','unknown'].includes(h)?'warn':''}">${healthLabels[h]||'额度未知'}</span><span class="badge ${s.would_block?'warn':''}">${status}</span>${M.activationAttention(s)?'<span class="badge warn">激活需关注</span>':''}${changed?'<span class="badge draft-badge">有草稿</span>':''}<span class="chevron" aria-hidden="true">⌄</span></div></summary><fieldset class="account-fields" ${saving||discarding?'disabled':''}><legend class="sr-only">${esc(a.name)}策略</legend><div class="account-body"><div class="quota-side">${quotaMarkup(s,r)}</div><div class="reset-side">${resetMarkup(s)}${activationMarkup(s)}</div></div></fieldset></details>`;
     }).join('')||'<div class="panel empty">没有匹配的账号。</div>');
   }
   const resultText=result => [result.management_status?`CPA HTTP ${result.management_status}`:'',result.http_status?`上游 HTTP ${result.http_status}`:'',result.code||''].filter(Boolean).join(' · ');
   function filteredGroups() {const query=$('event-search').value.trim().toLowerCase(),filter=$('event-filter').value;return M.groups(state.reset_events).filter(g => (!query||g.account.toLowerCase().includes(query)) && (filter==='all'||filter==='success'&&['success','confirmed'].includes(g.latest.state)||filter==='expired'&&g.latest.state==='expired'||filter==='attention'&&!['success','confirmed'].includes(g.latest.state)));}
+  function filteredActivationGroups() {const query=$('event-search').value.trim().toLowerCase(),filter=$('event-filter').value;return M.activationGroups(state.activation_events).filter(g => (!query||g.account.toLowerCase().includes(query)) && (filter==='all'||filter==='success'&&activationGood(g.latest)||filter==='attention'&&['pending','sending','verifying','blocked','uncertain','failed'].includes(g.latest.state)));}
   function renderEvents() {
-    const groups=filteredGroups();$('event-count').textContent=M.groups(state.reset_events).length;
+    const groups=filteredGroups(),activations=filteredActivationGroups();$('event-count').textContent=M.groups(state.reset_events).length+M.activationGroups(state.activation_events).length;
+    $('activation-event-count').textContent=M.activationGroups(state.activation_events).length;
+    markup($('activation-events'),activations.map(g=>`<details class="panel activation-operation" data-key="${esc(g.key)}"><summary><div><strong>${esc(g.account)}</strong><span class="meta">${esc(date(g.latest.at))} · ${esc(activationWindows(g.latest))}</span></div><span class="badge ${activationGood(g.latest)?'good':['uncertain','failed','blocked'].includes(g.latest.state)?'warn':''}">${esc(activationLabel(g.latest))}</span></summary><p>${esc(g.latest.reason||'额度刷新后自动激活')}</p><ol class="timeline">${g.events.map(e=>`<li><time>${esc(date(e.at))}</time><strong>${esc(activationLabel(e))}</strong><p class="meta">${esc(activationDetails(e))}</p>${e.reason?`<p>${esc(e.reason)}</p>`:''}${e.error?`<p class="error">${esc(e.error)}</p>`:''}${e.state==='succeeded'&&e.confirmed!==true?'<p class="hint">调用成功；计时启动状态等待额度查询确认。</p>':''}</li>`).join('')}</ol></details>`).join('')||'<div class="panel empty">暂无匹配的自动激活记录。</div>');
     markup($('events'),groups.map(g => `<details class="panel operation" data-key="${esc(g.key)}"><summary><div><strong>${esc(g.account)}</strong><span class="meta">${esc(date(g.latest.at))} · ${g.events.length} 条事件</span></div><span class="badge ${['success','confirmed'].includes(g.latest.state)?'good':['mismatch','expired'].includes(g.latest.state)||g.latest.result?.error?'warn':''}">${eventLabels[g.latest.state]||esc(g.latest.state)}</span></summary><p>${esc(g.latest.message)}</p><ol class="timeline">${g.events.map(e => `<li><time>${esc(date(e.at))}</time><strong>${eventLabels[e.state]||esc(e.state)}</strong><p>${esc(e.message)}</p>${e.result?`<p class="meta">${esc(resultText(e.result))}</p>${e.result.error?`<p class="error">${esc(e.result.error)}</p>`:''}`:''}</li>`).join('')}</ol></details>`).join('')||'<div class="panel empty">暂无匹配的执行记录。</div>');
   }
   function renderSettings() {
     document.querySelectorAll('[data-field]').forEach(input => syncInput(input,draft[input.dataset.field]));
     syncInput($('auto-enabled'),draft.auto_reset.enabled);syncInput($('auto-hours'),draft.auto_reset.before_hours);syncInput($('auto-include-new'),draft.auto_reset.include_new_accounts);
+    document.querySelectorAll('[data-activate]').forEach(input=>syncInput(input,draft.auto_activate[input.dataset.activate]));
+    const models=new Map();for(const s of state.accounts||[])for(const model of s.activation?.models||[])if(!models.has(model.id))models.set(model.id,model);
+    markup($('activate-model-options'),[...models.values()].map(m=>`<option value="${esc(m.id)}">最低思考：${esc(m.lowest_effort||'自动')}</option>`).join(''));
+    const enabledActivations=(state.accounts||[]).filter(s=>!s.account.disabled&&s.activation?.enabled).length;
+    $('activation-health').textContent=state.activation_error||`当前已保存策略：${state.policy.auto_activate.enabled?`自动激活已启用，${enabledActivations} 个账号参加`:'自动激活已关闭'}。调用记录可在「执行记录」查看。`;
+    $('activation-health').classList.toggle('error',!!state.activation_error);
     const sample=M.threshold(draft,{enabled:true,min_remaining_percent:20},{id:'example'});
     $('threshold-example').textContent=`以保留 20% 为例：剩余 ≤${number(sample.stop)}% 停止分配，恢复至 ≥${number(sample.resume)}% 后重新使用。${sample.permanent?'停止线达到100%，账号会持续被阻断。':''}`;
     const build=state.build||{version:state.version},health=state.health||{};
@@ -168,7 +190,7 @@
       const result=await request('status');result.policy=M.policy(result.policy);
       if(state && result.policy.revision<state.policy.revision)return false;
       state=result;receivedAt=new Date().toISOString();
-      if(!draft||discard||(!dirty && !saving && !document.activeElement.matches('[data-edit],[data-field],#auto-enabled,#auto-hours,#auto-include-new'))){draft=M.copy(state.policy);basePolicy=M.copy(state.policy);}
+      if(!draft||discard||(!dirty && !saving && !document.activeElement.matches('[data-edit],[data-field],[data-activate],#auto-enabled,#auto-hours,#auto-include-new'))){draft=M.copy(state.policy);basePolicy=M.copy(state.policy);}
       connected=true;$('session').hidden=true;$('content').hidden=false;$('toolbar').hidden=false;
       render();return true;
     }catch(error){if(!connected)disconnect(error.message);else message(error.message,true);return false;}
@@ -196,12 +218,14 @@
   for(const id of ['event-search','event-filter'])$(id).addEventListener(id.endsWith('search')?'input':'change',renderEvents);
   document.querySelectorAll('[data-field]').forEach(input => input.addEventListener(input.type==='number'?'input':'change',() => {if(saving||discarding)return;draft[input.dataset.field]=input.type==='number'?Number(input.value):input.value;edit();}));
   for(const [id,key]of [['auto-enabled','enabled'],['auto-hours','before_hours'],['auto-include-new','include_new_accounts']])$(id).addEventListener(id==='auto-hours'?'input':'change',event => {if(saving||discarding)return;draft.auto_reset[key]=event.target.type==='checkbox'?event.target.checked:Number(event.target.value);edit();});
+  document.querySelectorAll('[data-activate]').forEach(input=>input.addEventListener(input.type==='checkbox'?'change':'input',()=>{if(saving||discarding)return;draft.auto_activate[input.dataset.activate]=input.type==='checkbox'?input.checked:input.value.trim();edit();}));
   function accountEdit(event) {
     if(saving||discarding)return;
     const input=event.target,kind=input.dataset.edit,node=input.closest('[data-account-id]');if(!kind||!node)return;
-    if(event.type==='input'&&input.type!=='number'||event.type==='change'&&input.type==='number')return;
+    if(event.type==='input'&&!['number','text'].includes(input.type)||event.type==='change'&&['number','text'].includes(input.type))return;
     const s=state.accounts.find(s => s.account.id===node.dataset.accountId);if(!s)return;const a=s.account;
     if(kind==='auto'){Object.defineProperty(draft.auto_reset.accounts,autoKey(a),{value:input.checked,writable:true,enumerable:true,configurable:true});edit();return;}
+    if(kind==='activate'||kind==='activate-model'){const field=kind==='activate'?'accounts':'account_models';Object.defineProperty(draft.auto_activate[field],activationKey(a,field),{value:kind==='activate'?input.checked:input.value.trim(),writable:true,enumerable:true,configurable:true});edit();return;}
     const r=ruleFor(a,true);
     if(kind==='guard')r.enabled=input.checked;
     if(kind==='minimum')r.min_remaining_percent=Number(input.value);
@@ -221,7 +245,7 @@
   $('export-events').onclick=() => {
     // Never export account identifiers, credit IDs or upstream response text.
     const aliases=new Map(),alias=name=>{if(!aliases.has(name))aliases.set(name,`账号 ${aliases.size+1}`);return aliases.get(name);};
-    const records=filteredGroups().map(g=>({account:alias(g.account),events:g.events.map(e=>({at:e.at,state:e.state,management_status:e.result?.management_status,http_status:e.result?.http_status,code:e.result?.code}))}));
+    const records=[...filteredActivationGroups().map(g=>({kind:'activation',account:alias(g.account),events:g.events.map(e=>({at:e.at,state:e.state,windows:e.windows,model:e.model,reasoning:e.reasoning,input_tokens:e.input_tokens,output_tokens:e.output_tokens,confirmed:e.confirmed}))})),...filteredGroups().map(g=>({kind:'reset',account:alias(g.account),events:g.events.map(e=>({at:e.at,state:e.state,management_status:e.result?.management_status,http_status:e.result?.http_status,code:e.result?.code}))}))];
     const url=URL.createObjectURL(new Blob([JSON.stringify(records,null,2)],{type:'application/json'})),link=document.createElement('a');link.href=url;link.download='quota-guard-events-redacted.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   };
   window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue='';}});

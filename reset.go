@@ -536,6 +536,13 @@ func (e *engine) processReset(ctx context.Context, a account) {
 // resetMu is held. A confirmed reset clears only CPA's in-memory cooldown, never
 // the auth file. Quota protection still needs fresh quota observations to recover.
 func (e *engine) finishResetCooldown(a account, key string, op resetOperation, s *resetAccountStatus) {
+	if op.State == "confirmed" || op.State == "success" {
+		at := op.UpdatedAt
+		if op.LastResult != nil && !op.LastResult.At.IsZero() {
+			at = op.LastResult.At
+		}
+		e.markActivationReset(op.Identity, key, at)
+	}
 	if op.CooldownCleared {
 		return
 	}

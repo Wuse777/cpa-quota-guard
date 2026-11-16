@@ -15,10 +15,13 @@ import (
 func defaultPolicy() policy {
 	return policy{Revision: 1, Mode: "observe", PollSeconds: 60, MaxAgeSeconds: 180,
 		TimeoutSeconds: 15, SafetyPercent: 3, ResumeGapPercent: 5, UnknownAction: "block",
-		Strategy: "round-robin", Rules: []rule{}, AutoReset: resetPolicy{Enabled: false, IncludeNewAccounts: false, BeforeHours: 6, Accounts: map[string]bool{}}}
+		Strategy: "round-robin", Rules: []rule{}, AutoReset: resetPolicy{Enabled: false, IncludeNewAccounts: false, BeforeHours: 6, Accounts: map[string]bool{}}, AutoActivate: defaultActivationPolicy()}
 }
 
 func validatePolicy(p policy) error {
+	if err := validateActivationPolicy(p.AutoActivate); err != nil {
+		return err
+	}
 	if math.IsNaN(p.AutoReset.BeforeHours) || math.IsInf(p.AutoReset.BeforeHours, 0) || p.AutoReset.BeforeHours < 0.1 || p.AutoReset.BeforeHours > 168 {
 		return errors.New("重置卡提前时间须为 0.1–168 小时")
 	}

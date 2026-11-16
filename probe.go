@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -237,10 +238,14 @@ func appendCodexWindows(out []bucket, prefix string, m map[string]any, aux bool,
 			}
 		}
 		label := key
+		var windowSeconds int64
 		if seconds, ok := numberAt(w, "limit_window_seconds", "limitWindowSeconds"); ok {
 			label = fmt.Sprintf("%s · %.0f 小时", key, seconds/3600)
+			if seconds > 0 && seconds <= 366*24*3600 && seconds == math.Trunc(seconds) {
+				windowSeconds = int64(seconds)
+			}
 		}
-		out = append(out, bucket{ID: prefix + key, Label: prefix + label, RemainingPercent: remaining, ResetAt: reset, Auxiliary: aux})
+		out = append(out, bucket{ID: prefix + key, Label: prefix + label, RemainingPercent: remaining, ResetAt: reset, WindowSeconds: windowSeconds, Auxiliary: aux})
 	}
 	return out
 }

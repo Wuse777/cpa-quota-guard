@@ -54,6 +54,7 @@ func configure(raw []byte) error {
 			e.resetJournalError = "重置卡执行记录读取失败；自动使用已暂停，额度保护继续运行"
 		}
 		e.resetMu.Unlock()
+		e.initActivation()
 	}
 	go e.run()
 	return nil

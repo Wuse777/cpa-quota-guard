@@ -85,7 +85,7 @@ func TestFullStopLineIsExplicitlyReported(t *testing.T) {
 		t.Fatal("100% stop line needs an actionable warning")
 	}
 	raw, _ := json.Marshal(e.status())
-	for _, field := range []string{`"health":"healthy"`, `"effective_rule":`, `"warnings":[`, `"build":`, `"version":"0.3.0"`} {
+	for _, field := range []string{`"health":"healthy"`, `"effective_rule":`, `"warnings":[`, `"build":`, `"version":"` + version + `"`} {
 		if !strings.Contains(string(raw), field) {
 			t.Fatalf("missing status contract %s", field)
 		}

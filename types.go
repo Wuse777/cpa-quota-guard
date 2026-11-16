@@ -8,7 +8,7 @@ import (
 )
 
 const pluginID = "quota-guard"
-const version = "0.3.0"
+const version = "0.4.0"
 
 var buildCommit = "unknown"
 var buildTime = "unknown"
@@ -26,17 +26,18 @@ type runtimeConfig struct {
 }
 
 type policy struct {
-	Revision         uint64      `json:"revision"`
-	Mode             string      `json:"mode"`
-	PollSeconds      int         `json:"poll_seconds"`
-	MaxAgeSeconds    int         `json:"max_age_seconds"`
-	TimeoutSeconds   int         `json:"timeout_seconds"`
-	SafetyPercent    float64     `json:"safety_percent"`
-	ResumeGapPercent float64     `json:"resume_gap_percent"`
-	UnknownAction    string      `json:"unknown_action"`
-	Strategy         string      `json:"strategy"`
-	Rules            []rule      `json:"rules"`
-	AutoReset        resetPolicy `json:"auto_reset"`
+	Revision         uint64           `json:"revision"`
+	Mode             string           `json:"mode"`
+	PollSeconds      int              `json:"poll_seconds"`
+	MaxAgeSeconds    int              `json:"max_age_seconds"`
+	TimeoutSeconds   int              `json:"timeout_seconds"`
+	SafetyPercent    float64          `json:"safety_percent"`
+	ResumeGapPercent float64          `json:"resume_gap_percent"`
+	UnknownAction    string           `json:"unknown_action"`
+	Strategy         string           `json:"strategy"`
+	Rules            []rule           `json:"rules"`
+	AutoReset        resetPolicy      `json:"auto_reset"`
+	AutoActivate     activationPolicy `json:"auto_activate"`
 }
 
 type resetPolicy struct {
@@ -68,6 +69,7 @@ type bucket struct {
 	Label            string    `json:"label"`
 	RemainingPercent float64   `json:"remaining_percent"`
 	ResetAt          time.Time `json:"reset_at,omitempty"`
+	WindowSeconds    int64     `json:"limit_window_seconds,omitempty"`
 	// Auxiliary quotas (code review / named model limits) require explicit selection.
 	Auxiliary bool `json:"auxiliary,omitempty"`
 }
@@ -88,11 +90,12 @@ type decision struct {
 type accountStatus struct {
 	snapshot
 	decision
-	WouldBlock    bool                `json:"would_block"`
-	Reset         *resetAccountStatus `json:"reset,omitempty"`
-	Health        string              `json:"health"`
-	EffectiveRule *rule               `json:"effective_rule"`
-	Warnings      []string            `json:"warnings"`
+	WouldBlock    bool                     `json:"would_block"`
+	Reset         *resetAccountStatus      `json:"reset,omitempty"`
+	Activation    *activationAccountStatus `json:"activation,omitempty"`
+	Health        string                   `json:"health"`
+	EffectiveRule *rule                    `json:"effective_rule"`
+	Warnings      []string                 `json:"warnings"`
 }
 
 type candidate struct {

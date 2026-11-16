@@ -43,6 +43,9 @@ reset_failure = False
 missing_primary = set()
 reset_query_delay = 0
 inventory_started = threading.Event()
+activation_calls = []
+activation_windows = {}
+activation_failure = False
 
 
 class Probe(http.server.BaseHTTPRequestHandler):
@@ -76,11 +79,39 @@ class Probe(http.server.BaseHTTPRequestHandler):
             data = {"rate_limit": {"primary_window": {
                 "used_percent": 100 - remaining, "limit_window_seconds": 18000},
                 "secondary_window": {"used_percent": 10, "limit_window_seconds": 604800}}}
+            if name in activation_windows:
+                data["rate_limit"] = json.loads(json.dumps(activation_windows[name]))
+                for window in data["rate_limit"].values():
+                    if window.pop("fixture_recover", False) and time.time() >= window["reset_at"]:
+                        window["used_percent"] = 0
             if name in missing_primary:
                 data["rate_limit"].pop("primary_window")
         self.wfile.write(json.dumps(data).encode())
 
     def do_POST(self):
+        if "/codex-activate/" in self.path:
+            name = self.path.rsplit("/", 1)[-1]
+            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            activation_calls.append({"account": name, "payload": payload})
+            if activation_failure:
+                self.send_response(503)
+                self.end_headers()
+                return
+            for window in activation_windows.get(name, {}).values():
+                if window["used_percent"] == 0 or window.get("fixture_recover") and time.time() >= window["reset_at"]:
+                    window.update(used_percent=0.001, reset_at=int(time.time()) + window["limit_window_seconds"])
+                    window.pop("fixture_recover", None)
+            response = {"id": "activation_local", "status": "completed", "model": payload["model"],
+                        "usage": {"input_tokens": 8, "output_tokens": 1, "total_tokens": 9},
+                        "output": [{"type": "message", "role": "assistant", "content": [
+                            {"type": "output_text", "text": "OK"}]}]}
+            raw = ("data: " + json.dumps({"type": "response.completed", "response": response}) + "\n\n").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         if "/codex-reset/" in self.path and self.path.endswith("/consume"):
             name = self.path.split("/")[-2]
             payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
@@ -204,7 +235,7 @@ def generate(model, stream=False):
 
 
 def main():
-    global reset_failure, reset_query_delay
+    global reset_failure, reset_query_delay, activation_failure
     def stop_on_signal(_signum, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stop_on_signal)
@@ -236,6 +267,8 @@ def main():
                 "priority": priority, "expired": "2099-01-01T00:00:00Z", "plan_type": "pro"}
         if provider == "antigravity":
             item["project_id"] = "local-fixture-project"
+        else:
+            item["account_id"] = "local-fixture-account-" + name
         (auths / name).write_text(json.dumps(item))
     static = work / "static"
     static.mkdir()
@@ -286,6 +319,10 @@ def main():
         check("fresh installations require explicit automatic redemption enrollment",
               s["policy"]["auto_reset"]["enabled"] is False
               and s["policy"]["auto_reset"]["include_new_accounts"] is False)
+        check("automatic activation is off for fresh installations",
+              not s["policy"]["auto_activate"]["enabled"]
+              and not s["policy"]["auto_activate"]["include_new_accounts"]
+              and not activation_calls)
         check("runtime exposes build provenance and compatibility",
               s.get("build", {}).get("version") == expected_version
               and bool(s["build"].get("commit")))
@@ -447,9 +484,110 @@ def main():
         proc = start()
         s = wait_for(lambda s: any(a.get("reset", {}).get("last_result", {}).get("code") == "policy_denied" for a in s["accounts"]))
         check("redemption failure survives real CPA restart", reset_account(s)["last_result"]["http_status"] == 403)
+        # Activation uses the real CPA account/model catalog and management
+        # forwarding, with the upstream confined to the local Probe fixture.
+        def window(seconds, used, deadline=None, recover=False):
+            value = {"limit_window_seconds": seconds, "used_percent": used,
+                     "reset_at": int(time.time()) - 2 if deadline is None else deadline}
+            if recover:
+                value["fixture_recover"] = True
+            return value
+
+        def activation(snapshot, name="a.json"):
+            return next(a["activation"] for a in snapshot["accounts"] if a["account"]["name"] == name)
+
+        def last_success(snapshot, name="a.json"):
+            event = activation(snapshot, name).get("last_result") or {}
+            return event if event.get("state") == "succeeded" else {}
+
+        activation_windows["a.json"] = {"primary_window": window(18000, 0),
+                                           "secondary_window": window(604800, 0)}
+        p = status()["policy"]
+        p["auto_reset"]["enabled"] = False
+        p["auto_activate"].update(enabled=True, accounts={"a.json": True, "b.json": False},
+                                  include_new_accounts=False, model="")
+        save(p)
+        refresh()
+        s = wait_for(lambda s: last_success(s))
+        check("two idle quota windows merge into one fixed-account activation",
+              len(activation_calls) == 1 and activation_calls[0]["account"] == "a.json"
+              and len(last_success(s)["windows"]) == 2)
+        payload = activation_calls[0]["payload"]
+        s = wait_for(lambda s: activation(s).get("models"))
+        check("activation automatically chooses an available model at minimum reasoning",
+              payload["model"] in [m["id"] for m in activation(s)["models"]]
+              and payload.get("reasoning", {}).get("effort") == "low"
+              and not payload.get("tools") and not payload.get("previous_response_id"))
+        check("activation journals actual usage from the completed response",
+              last_success(s)["input_tokens"] == 8 and last_success(s)["output_tokens"] == 1)
+        s = wait_for(lambda s: last_success(s).get("confirmed"))
+        check("activation separately verifies the new quota timers", last_success(s)["confirmed"])
+        refresh()
+        wait_for(lambda s: not s["health"]["quota_refreshing"])
+        check("repeated quota queries do not consume again", len(activation_calls) == 1)
+        proc.terminate()
+        proc.wait(timeout=15)
+        proc = start()
+        wait_for(lambda s: len(s["accounts"]) == 3 and last_success(s))
+        check("activation deduplication survives a real CPA restart", len(activation_calls) == 1)
+
+        due = int(time.time()) + 4
+        activation_windows["a.json"] = {"primary_window": window(18000, 10, due, True),
+                                           "secondary_window": window(604800, 5, int(time.time()) + 20000)}
+        refresh()
+        wait_for(lambda s: any(a["account"]["name"] == "a.json" and
+                              a["buckets"][0]["remaining_percent"] == 90 for a in s["accounts"]))
+        s = wait_for(lambda s: len(activation_calls) == 2 and last_success(s), seconds=18)
+        check("natural reset wakes activation before the ordinary 60-second poll",
+              len(activation_calls) == 2 and time.time() < due + 18)
+
+        activation_windows["a.json"] = {"primary_window": window(18000, 20, int(time.time()) + 1000),
+                                           "secondary_window": window(604800, 20, int(time.time()) + 10000)}
+        refresh()
+        wait_for(lambda s: any(a["account"]["name"] == "a.json" and
+                              a["buckets"][0]["remaining_percent"] == 80 for a in s["accounts"]))
+        activation_windows["a.json"] = {"primary_window": window(18000, 0),
+                                           "secondary_window": window(604800, 0)}
+        refresh()
+        s = wait_for(lambda s: len(activation_calls) == 3 and last_success(s))
+        check("manual reset quota changes activate both windows once", len(last_success(s)["windows"]) == 2)
+
+        activation_windows["b.json"] = {"primary_window": window(604800, 0)}
+        missing_primary.add("b.json")
+        p = status()["policy"]
+        p["auto_activate"]["accounts"]["b.json"] = True
+        p["rules"][1]["windows"] = {"primary": 20}
+        save(p)
+        refresh()
+        wait_for(lambda s: any(a["account"]["name"] == "b.json" and a.get("error") for a in s["accounts"]))
+        check("unknown quota cannot trigger a model request", len(activation_calls) == 3)
+        missing_primary.clear()
+        refresh()
+        s = wait_for(lambda s: len(activation_calls) == 4 and last_success(s, "b.json"))
+        check("a primary window that lasts one week is correctly activated",
+              activation_calls[-1]["account"] == "b.json" and last_success(s, "b.json")["windows"] == ["weekly"])
+
+        activation_windows["a.json"] = {"primary_window": window(18000, 20, int(time.time()) + 1000),
+                                           "secondary_window": window(604800, 20, int(time.time()) + 10000)}
+        refresh()
+        wait_for(lambda s: any(a["account"]["name"] == "a.json" and
+                              a["buckets"][0]["remaining_percent"] == 80 for a in s["accounts"]))
+        activation_failure = True
+        activation_windows["a.json"] = {"primary_window": window(18000, 0),
+                                           "secondary_window": window(604800, 0)}
+        refresh()
+        s = wait_for(lambda s: len(activation_calls) == 5 and activation(s).get("state") == "uncertain")
+        refresh()
+        proc.terminate()
+        proc.wait(timeout=15)
+        proc = start()
+        s = wait_for(lambda s: len(s["accounts"]) == 3 and activation(s).get("state") == "uncertain")
+        check("an ambiguous upstream failure is never automatically retried after restart", len(activation_calls) == 5)
+        activation_failure = False
         # Leave a safe observation fixture for the browser acceptance test.
         p = status()["policy"]
         p["mode"] = "observe"
+        p["auto_activate"]["enabled"] = False
         save(p)
         report = {"checks": results, "count": len(results), "plugin_sha256": hashlib.sha256(Path(args.plugin).read_bytes()).hexdigest()}
         args.report.parent.mkdir(parents=True, exist_ok=True)

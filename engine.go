@@ -40,6 +40,13 @@ type engine struct {
 	resetJournal         resetJournal
 	resetJournalError    string
 	resetSnapshots       map[string]resetAccountStatus
+	activationMu         sync.Mutex
+	activationJournal    activationJournal
+	activationError      string
+	activationStatuses   map[string]activationAccountStatus
+	activationIdentities map[string]string
+	activationWake       chan struct{}
+	activationModelAt    map[string]time.Time
 }
 
 func newEngine(cfg runtimeConfig, host hostCall) (*engine, error) {
@@ -61,6 +68,7 @@ func newEngine(cfg runtimeConfig, host hostCall) (*engine, error) {
 	if journalErr != nil {
 		e.resetJournalError = "重置卡执行记录读取失败；自动使用已暂停，额度保护继续运行"
 	}
+	e.initActivation()
 	if cfg.NotificationWebhookFile != "" {
 		e.notificationStatus = notificationStatus{Enabled: true, Health: "ready"}
 		if _, err := readWebhook(cfg.NotificationWebhookFile); err != nil {
@@ -76,10 +84,12 @@ func (e *engine) run() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var workers sync.WaitGroup
-	workers.Add(3)
+	workers.Add(5)
 	go func() { defer workers.Done(); e.runQuotaWorker(ctx) }()
 	go func() { defer workers.Done(); e.runResetWorker(ctx) }()
 	go func() { defer workers.Done(); e.runNotificationWorker(ctx) }()
+	go func() { defer workers.Done(); e.runActivationWorker(ctx) }()
+	go func() { defer workers.Done(); e.runActivationCatalogWorker(ctx) }()
 	<-e.stop
 	cancel()
 	workers.Wait()
@@ -170,7 +180,6 @@ func (e *engine) refreshQuota(ctx context.Context, force bool) error {
 	}
 	wg.Wait()
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	for id := range e.snapshots {
 		if !seen[id] {
 			delete(e.snapshots, id)
@@ -187,6 +196,12 @@ func (e *engine) refreshQuota(ctx context.Context, force bool) error {
 		_ = e.evaluate(s.Account, time.Now())
 	}
 	e.lastRefreshError = ""
+	activationSnapshots := make([]snapshot, 0, len(e.snapshots))
+	for _, s := range e.snapshots {
+		activationSnapshots = append(activationSnapshots, s)
+	}
+	e.mu.Unlock()
+	e.observeActivations(ctx, activationSnapshots)
 	return ctx.Err()
 }
 
@@ -341,21 +356,25 @@ func (e *engine) status() any {
 	for _, s := range e.snapshots {
 		d := e.evaluate(s.Account, time.Now())
 		reset, _, _ := e.resetView(s.Account)
-		statuses = append(statuses, accountStatus{snapshot: s, decision: d, WouldBlock: d.Protected, Reset: reset, Health: quotaHealth(s, e.p, time.Now()), EffectiveRule: e.ruleFor(s.Account), Warnings: e.ruleWarnings(s.Account)})
+		activation, _, _ := e.activationView(s.Account, e.p.AutoActivate)
+		statuses = append(statuses, accountStatus{snapshot: s, decision: d, WouldBlock: d.Protected, Reset: reset, Activation: activation, Health: quotaHealth(s, e.p, time.Now()), EffectiveRule: e.ruleFor(s.Account), Warnings: e.ruleWarnings(s.Account)})
 	}
 	sort.Slice(statuses, func(i, j int) bool { return statuses[i].Account.Name < statuses[j].Account.Name })
 	_, events, resetError := e.resetView(account{})
+	_, activationEvents, activationError := e.activationView(account{}, e.p.AutoActivate)
 	return struct {
-		Version       string             `json:"version"`
-		Policy        policy             `json:"policy"`
-		Accounts      []accountStatus    `json:"accounts"`
-		RefreshError  string             `json:"refresh_error,omitempty"`
-		ResetEvents   []resetEvent       `json:"reset_events"`
-		ResetError    string             `json:"reset_error,omitempty"`
-		Build         buildInfo          `json:"build"`
-		Health        engineHealth       `json:"health"`
-		Notifications notificationStatus `json:"notifications"`
-	}{version, e.p, statuses, e.lastRefreshError, events, resetError, buildInfo{version, buildCommit, buildTime, runtime.Version(), "0.3.0", "8.0.35 / C ABI 1 / schema 6", "1.26.5 (verified HTML build)"}, e.health, e.notificationsView()}
+		Version          string             `json:"version"`
+		Policy           policy             `json:"policy"`
+		Accounts         []accountStatus    `json:"accounts"`
+		RefreshError     string             `json:"refresh_error,omitempty"`
+		ResetEvents      []resetEvent       `json:"reset_events"`
+		ResetError       string             `json:"reset_error,omitempty"`
+		Build            buildInfo          `json:"build"`
+		Health           engineHealth       `json:"health"`
+		Notifications    notificationStatus `json:"notifications"`
+		ActivationEvents []activationEvent  `json:"activation_events"`
+		ActivationError  string             `json:"activation_error,omitempty"`
+	}{version, e.p, statuses, e.lastRefreshError, events, resetError, buildInfo{version, buildCommit, buildTime, runtime.Version(), "0.4.0", "8.0.35 / C ABI 1 / schema 6", "1.26.5 (verified HTML build)"}, e.health, e.notificationsView(), activationEvents, activationError}
 }
 
 var errRevision = errors.New("配置已被其他页面修改，请刷新后重试")
@@ -398,5 +417,6 @@ func (e *engine) updatePolicy(p policy) error {
 	case e.resetWake <- struct{}{}:
 	default:
 	}
+	e.wakeActivation()
 	return nil
 }

@@ -1,6 +1,6 @@
 # CPA Quota Guard
 
-为 CLIProxyAPI 提供**按账号保留额度**与 **Codex 临期重置卡自动使用**，在 CPAMC 内直接查看和配置。
+为 CLIProxyAPI 提供**按账号保留额度**、**Codex 临期重置卡自动使用**与**额度刷新后自动激活**，在 CPAMC 内直接查看和配置。
 
 [English](README.en.md) · [安装与回滚](docs/INSTALLATION.md) · [配置说明](docs/CONFIGURATION.md) · [测试](docs/TESTING.md) · [更新记录](CHANGELOG.md)
 
@@ -15,6 +15,7 @@
 - 观察 / 执行模式、未知额度处理、轮询 / 依次使用与账号优先级。
 - Codex、Antigravity 额度查询；其他服务商尚未适配。
 - Codex 重置卡到期前自动使用，支持提前时间、总开关和账号开关。
+- Codex 自然刷新或手动/自动使用重置卡后，按五小时/周窗口去重，发送极短请求及时启动计时；支持自动选模和账号指定模型，使用最低支持思考档。
 - 持久化兑换请求编号与执行记录，重启后核实未完成请求。
 - 直接沿用 CPAMC 登录会话及主题；无插件二次密钥登录。
 - 原生风格控件与动效、键盘标签导航、窄屏排版和减少动态效果支持。
@@ -36,12 +37,12 @@
 
 ## 快速开始
 
-从本仓库 **Releases** 下载 Linux amd64 安装包和外部 `SHA256SUMS`。解压前后分别校验：
+取得可信的 Linux amd64 安装包和外部 `SHA256SUMS`，或从源码构建并使用 `scripts/package_release.py` 打包。解压前后分别校验：
 
 ```bash
 sha256sum -c SHA256SUMS
-tar -xzf cpa-quota-guard_0.3.0_linux_amd64.tar.gz
-cd cpa-quota-guard-0.3.0
+tar -xzf cpa-quota-guard_0.4.0_linux_amd64.tar.gz
+cd cpa-quota-guard-0.4.0
 sha256sum -c dist/SHA256SUMS
 
 # 安装器需要 Python 的 yaml 模块；Debian / Ubuntu 可使用发行版软件包。
@@ -65,6 +66,8 @@ sudo python3 install.py --apply --management-key-file /root/cpa-management.key
 其他管理界面/SSO 插件可共存。安装器按调度能力预检；8.0.35 未提供完整能力字段时，使用精确绑定已审核共享库 SHA256 的声明，未知能力在变更前阻止。已有面板扩展同样需要区块 SHA256 声明并继续校验原始 HTML。格式见安装文档。
 
 0.2.2 的卡片查询与兑换通过 CPA 管理接口转发，与 CPAMC 手动重置共用调用路径。升级请运行新版安装器，配置本机管理地址及 0600 私有密钥文件；仅替换共享库不足以启用此调用方式。执行记录保留脱敏失败详情，列表查询成功和重启不会清除最近兑换错误。
+
+0.4.0 新增“刷新后自动激活”，从旧策略升级时默认关闭。启用后独立在服务器运行，按账号和周期持久化去重，模型自动选择或单独指定，始终使用最低支持思考档。手动重置由后续额度查询识别；普通刷新查询不会直接触发请求。结果不明确时不自动补发，调用用量保存于独立激活记录。详情见[配置说明](docs/CONFIGURATION.md#刷新后自动激活)。
 
 ## 行为与限制
 

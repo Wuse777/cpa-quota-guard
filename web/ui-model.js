@@ -10,6 +10,10 @@
     result.auto_reset ||= {enabled:false, before_hours:6, include_new_accounts:false, accounts:{}};
     result.auto_reset.accounts ||= {};
     result.auto_reset.include_new_accounts ??= false;
+    result.auto_activate ||= {};
+    for (const [key,value] of Object.entries({enabled:false,include_new_accounts:false,natural:true,reset:true,five_hour:true,weekly:true,model:''})) result.auto_activate[key] ??= value;
+    result.auto_activate.accounts ||= {};
+    result.auto_activate.account_models ||= {};
     return result;
   }
   const ruleFor = (p, account) => p.rules.find(rule => keys(account).includes(rule.account));
@@ -17,6 +21,18 @@
     const key = keys(account).find(key => Object.hasOwn(p.auto_reset.accounts, key));
     return key ? p.auto_reset.accounts[key] : !!p.auto_reset.include_new_accounts;
   }
+  function activationEnabled(p, account) {
+    const activation = p.auto_activate || {};
+    const key = keys(account).find(key => Object.hasOwn(activation.accounts || {},key));
+    return key ? !!activation.accounts[key] : !!activation.include_new_accounts;
+  }
+  function activationModelFor(p, account) {
+    const activation = p.auto_activate || {};
+    const key = keys(account).find(key => Object.hasOwn(activation.account_models || {},key));
+    return (key && activation.account_models[key]) || activation.model || '';
+  }
+  const activationAttention = snapshot => ['blocked','uncertain','failed'].includes(snapshot.activation?.state) || !!snapshot.activation?.last_result?.error;
+  const activationWindow = value => ({five_hour:'五小时额度',weekly:'周额度','18000':'五小时额度','604800':'周额度'}[String(value)] || String(value));
   function health(snapshot, p, now = Date.now()) {
     if (snapshot.account.disabled) return 'disabled';
     if (snapshot.health) return snapshot.health;
@@ -59,10 +75,12 @@
       } else fields.push({path,before:a,after:b});
     }
     visit(base,draft);
-    const globalChange = fields.some(f => !f.path.startsWith('rules.') && !f.path.startsWith('auto_reset.accounts.'));
+    const globalChange = fields.some(f => !['rules.','auto_reset.accounts.','auto_activate.accounts.','auto_activate.account_models.'].some(prefix => f.path.startsWith(prefix)));
     const impacted = accounts.filter(s => !s.account.disabled && (globalChange ||
       JSON.stringify(ruleFor(base,s.account)) !== JSON.stringify(ruleFor(draft,s.account)) ||
-      autoEnabled(base,s.account) !== autoEnabled(draft,s.account)));
+      autoEnabled(base,s.account) !== autoEnabled(draft,s.account) ||
+      activationEnabled(base,s.account) !== activationEnabled(draft,s.account) ||
+      activationModelFor(base,s.account) !== activationModelFor(draft,s.account)));
     return {fields,count:fields.length,impacted:impacted.length};
   }
   function groups(events) {
@@ -75,11 +93,21 @@
     return [...result.values()].map(g => { g.events.sort((a,b) => Date.parse(a.at)-Date.parse(b.at)); g.latest=g.events.at(-1); return g; })
       .sort((a,b) => Date.parse(b.latest.at)-Date.parse(a.latest.at));
   }
+  function activationGroups(events) {
+    const result = new Map();
+    for (const [index,event] of (events || []).entries()) {
+      const key = event.operation_id || event.id || `${event.account}\u0000${event.at}\u0000${index}`;
+      if (!result.has(key)) result.set(key,{key,account:event.account || '',events:[]});
+      result.get(key).events.push(event);
+    }
+    return [...result.values()].map(g => {g.events.sort((a,b) => Date.parse(a.at)-Date.parse(b.at));g.latest=g.events.at(-1);return g;})
+      .sort((a,b) => Date.parse(b.latest.at)-Date.parse(a.latest.at));
+  }
   function accountMatches(snapshot, query, filter, p) {
     const a = snapshot.account, h=health(snapshot,p);
     if (query && ![a.name,a.id,a.provider,a.email].join(' ').toLowerCase().includes(query.toLowerCase())) return false;
     return filter === 'all' || filter === 'enabled' && !a.disabled || filter === 'disabled' && a.disabled ||
-      filter === 'protected' && snapshot.would_block || filter === 'attention' && !a.disabled && (['error','stale','unknown'].includes(h) || ['blocked','error'].includes(scheduler(snapshot)));
+      filter === 'protected' && snapshot.would_block || filter === 'attention' && !a.disabled && (['error','stale','unknown'].includes(h) || ['blocked','error'].includes(scheduler(snapshot)) || activationAttention(snapshot));
   }
-  globalThis.QuotaUI = {copy,validDate,keys,policy,ruleFor,autoEnabled,health,liveCredits,scheduler,actionable,summary,threshold,changes,groups,accountMatches};
+  globalThis.QuotaUI = {copy,validDate,keys,policy,ruleFor,autoEnabled,activationEnabled,activationModelFor,activationAttention,activationWindow,health,liveCredits,scheduler,actionable,summary,threshold,changes,groups,activationGroups,accountMatches};
 })();

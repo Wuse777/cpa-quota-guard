@@ -16,7 +16,7 @@ import urllib.request
 import yaml
 from cpamc_bridge import inject_session_bridge, panel_diagnostics
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 ROOT = Path(__file__).resolve().parent
 
 
@@ -184,6 +184,7 @@ def policy_summary(state_dir, auto_reset=None, reset_accounts=()):
         auto = value.get("auto_reset", {"enabled": True, "before_hours": 6, "accounts": {}})
         return {"source": "existing policy; unchanged", "quota_mode": value.get("mode", "observe"),
                 "auto_reset_enabled": auto.get("enabled", True),
+                "auto_activate_enabled": value.get("auto_activate", {}).get("enabled", False),
                 "include_new_accounts": auto.get("include_new_accounts", True),
                 "auto_reset_before_hours": auto.get("before_hours", 6),
                 "explicit_reset_accounts": sum(bool(v) for v in auto.get("accounts", {}).values())}, None
@@ -196,6 +197,7 @@ def policy_summary(state_dir, auto_reset=None, reset_accounts=()):
                                  accounts={name: True for name in reset_accounts})
     return {"source": "new safe policy", "quota_mode": value["mode"],
             "auto_reset_enabled": value["auto_reset"]["enabled"], "include_new_accounts": False,
+            "auto_activate_enabled": value.get("auto_activate", {}).get("enabled", False),
             "auto_reset_before_hours": value["auto_reset"]["before_hours"],
             "explicit_reset_accounts": len(reset_accounts)}, value
 
@@ -435,6 +437,7 @@ def main():
     print(json.dumps({"installed": VERSION, "backup": str(backup),
                       "quota_mode": actual.get("mode", policy["quota_mode"]),
                       "auto_reset_enabled": actual.get("auto_reset", {}).get("enabled", policy["auto_reset_enabled"]),
+                      "auto_activate_enabled": actual.get("auto_activate", {}).get("enabled", False),
                       "include_new_accounts": actual.get("auto_reset", {}).get("include_new_accounts", policy["include_new_accounts"]),
                       "policy_and_journal": "existing files preserved; no refresh or consume test requested"},
                      indent=2, ensure_ascii=False))

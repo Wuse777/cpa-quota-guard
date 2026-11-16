@@ -1,6 +1,6 @@
 {
   "name": "cpa-quota-guard-ui-checks",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Isolated browser regression checks; no production accounts are used",
   "scripts": {

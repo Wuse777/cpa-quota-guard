@@ -1,11 +1,11 @@
 # 安装、升级与回滚
 
-需要兼容的 CPA 8.0.35 / CPAMC 1.26.5、Linux amd64/glibc、systemd、Python 3 与 PyYAML。默认服务和用户为 `cliproxyapi`。先从 Releases 下载 0.3.0 安装包及外部 `SHA256SUMS`：
+需要兼容的 CPA 8.0.35 / CPAMC 1.26.5、Linux amd64/glibc、systemd、Python 3 与 PyYAML。默认服务和用户为 `cliproxyapi`。取得可信的 0.4.0 安装包及外部 `SHA256SUMS`，或从源码构建打包：
 
 ```bash
 sha256sum -c SHA256SUMS
-tar -xzf cpa-quota-guard_0.3.0_linux_amd64.tar.gz
-cd cpa-quota-guard-0.3.0
+tar -xzf cpa-quota-guard_0.4.0_linux_amd64.tar.gz
+cd cpa-quota-guard-0.4.0
 sha256sum -c dist/SHA256SUMS
 sudo apt-get install python3-yaml
 python3 install.py --doctor
@@ -30,6 +30,8 @@ sudo python3 install.py --apply --management-key-file /root/cpa-management.key \
 `--auto-reset on` 必须同时列出至少一个 `--reset-account`，可以重复该参数。安装器始终让 `include_new_accounts=false`。`--auto-reset off` 可显式选择默认关闭。它们只适用于没有 `policy.json` 的首次安装。
 
 **升级保留现有策略和执行记录，不用新默认覆盖老设置。** 旧文件若没有 `include_new_accounts`，后端将其视为 `true`，维持原先缺省账号参与兑换的行为；没有 `auto_reset` 的更老文件也沿用旧版开启行为。升级后请在面板检查，并按需要关闭“自动加入新增账号”。观察/执行模式及既有账号规则保留。
+
+0.4.0 的 `auto_activate` 默认关闭，升级不自动启用。安装后可在面板选择账号、窗口及模型并开启；模型始终使用最低支持思考档。该功能同样需要本机管理地址和管理密钥。回滚至不能识别此字段的 0.3.x 前，先停服务并从策略中移除 `auto_activate`（其余字段保留），保存激活 journal 以供以后升级恢复，再恢复旧共享库和配置。不要把含新字段的策略直接交给旧版本的严格 JSON 解析器。
 
 ## 密钥和正式安装
 

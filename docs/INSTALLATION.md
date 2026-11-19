@@ -1,6 +1,6 @@
 # 安装、升级与回滚
 
-需要兼容的 CPA 8.0.35 / CPAMC 1.26.5、Linux amd64/glibc、systemd、Python 3 与 PyYAML。默认服务和用户为 `cliproxyapi`。取得可信的 0.5.0 安装包及外部 `SHA256SUMS`，或从源码构建打包：
+需要兼容的 CPA 8.0.35 或 8.0.77、CPAMC 1.26.5 或 1.28.1、Linux amd64/glibc、systemd、Python 3 与 PyYAML。默认服务和用户为 `cliproxyapi`。取得可信的 0.5.0 安装包及外部 `SHA256SUMS`，或从源码构建打包：
 
 ```bash
 sha256sum -c SHA256SUMS
@@ -51,7 +51,7 @@ sudo python3 install.py --apply --management-key-file /root/cpa-management.key
 
 ## 其他插件与面板扩展
 
-纯管理界面或 SSO 插件可以共存；其他调度插件必须先解决调度冲突。安装器优先使用宿主明确返回的 `supports_scheduler` / `capabilities.scheduler`。CPA 8.0.35 的插件列表没有该字段，因此不能仅凭插件名称或菜单判断安全。
+纯管理界面或 SSO 插件可以共存；其他调度插件必须先解决调度冲突。安装器优先使用宿主明确返回的 `supports_scheduler` / `capabilities.scheduler`。宿主的插件列表没有该字段时，不能仅凭插件名称或菜单判断安全。
 
 旧宿主可提供经维护者核实的能力声明，绑定当前已安装二进制 SHA256：
 

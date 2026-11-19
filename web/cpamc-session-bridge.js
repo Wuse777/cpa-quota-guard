@@ -1,4 +1,4 @@
-// Runs inside the CPAMC 1.26.5 module, with its existing API client and auth store.
+// Runs inside a verified CPAMC module, with its existing API client and auth store.
 // Requests are limited to this plugin's attached, same-origin iframe. No key is
 // copied into the iframe, browser storage, URLs, or messages.
 (() => {

@@ -1,4 +1,4 @@
-"""Exercise the built plugin inside an unmodified CPA 8.0.35 process.
+"""Exercise the built plugin inside an unmodified supported CPA process.
 
 Uses fake OAuth accounts, a local quota endpoint, and a local HTTPS CONNECT proxy.
 No model request or credential is sent to an external service.
@@ -248,6 +248,7 @@ def main():
     parser.add_argument("--cpa", default="/opt/cliproxyapi/cli-proxy-api")
     parser.add_argument("--panel", type=Path, default=Path("/opt/cliproxyapi/static/management.html"),
                         help="verified CPAMC HTML, required only for --serve browser acceptance")
+    parser.add_argument("--panel-extensions", type=Path, help="optional SHA256-bound panel extension declarations")
     parser.add_argument("--report", type=Path, default=Path("test-results/integration-report.json"))
     parser.add_argument("--serve", action="store_true")
     args = parser.parse_args()
@@ -278,9 +279,10 @@ def main():
     static.mkdir()
     panel = args.panel
     if panel.exists():
-        (static / "management.html").write_bytes(inject_session_bridge(panel.read_bytes()))
+        extensions = json.loads(args.panel_extensions.read_text()) if args.panel_extensions else None
+        (static / "management.html").write_bytes(inject_session_bridge(panel.read_bytes(), extensions))
     elif args.serve:
-        parser.error("--serve requires --panel pointing to the verified CPAMC 1.26.5 HTML")
+        parser.error("--serve requires --panel pointing to a verified CPAMC HTML asset")
     config = {"config-version": 8, "server": {"host": "127.0.0.1", "port": 18317},
               "management": {"allow-remote": False, "secret-key": KEY, "disable-auto-update-panel": True},
               "access": {"api-keys": [ACCESS]}, "oauth": {"auth-dir": str(auths)},

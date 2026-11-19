@@ -384,7 +384,7 @@ func (e *engine) status() any {
 		ActivationEvents        []activationEvent  `json:"activation_events"`
 		ActivationError         string             `json:"activation_error,omitempty"`
 		NextScheduledActivation *time.Time         `json:"next_scheduled_activation,omitempty"`
-	}{version, e.p, statuses, e.lastRefreshError, events, resetError, buildInfo{version, buildCommit, buildTime, runtime.Version(), "0.4.0", "8.0.35 / C ABI 1 / schema 6", "1.26.5 (verified HTML build)"}, e.health, e.notificationsView(), activationEvents, activationError, nextScheduledActivation}
+	}{version, e.p, statuses, e.lastRefreshError, events, resetError, buildInfo{version, buildCommit, buildTime, runtime.Version(), "0.4.0", "8.0.35 / 8.0.77 (plugin C ABI 1 / schema 6)", "1.26.5 / 1.28.1 (verified HTML builds)"}, e.health, e.notificationsView(), activationEvents, activationError, nextScheduledActivation}
 }
 
 var errRevision = errors.New("配置已被其他页面修改，请刷新后重试")

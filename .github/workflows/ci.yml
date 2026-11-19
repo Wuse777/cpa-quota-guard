@@ -38,15 +38,20 @@ jobs:
       - name: Fetch version and SHA256 pinned public fixtures
         if: matrix.go == '1.27.3'
         run: python3 scripts/fetch_fixtures.py
-      - name: Real CPA isolated integration
+      - name: Real CPA integration and process/systemd install rollback
         if: matrix.go == '1.27.3'
-        run: python3 tests/integration.py --plugin dist/quota-guard.so --cpa "$PWD/test-results/fixtures/cli-proxy-api" --panel "$PWD/test-results/fixtures/management.html"
-      - name: Actual install, companion coexistence and verified rollback
-        if: matrix.go == '1.27.3'
-        run: python3 tests/install_integration.py --runtime process --plugin dist/quota-guard.so --cpa "$PWD/test-results/fixtures/cli-proxy-api" --panel "$PWD/test-results/fixtures/management.html"
-      - name: Real systemd installation and rollback
-        if: matrix.go == '1.27.3'
-        run: sudo "$(command -v python3)" tests/install_integration.py --runtime systemd --report test-results/install-systemd-report.json --plugin dist/quota-guard.so --cpa "$PWD/test-results/fixtures/cli-proxy-api" --panel "$PWD/test-results/fixtures/management.html"
+        run: |
+          for pair in legacy current; do
+            cpa="$PWD/test-results/fixtures/cli-proxy-api"
+            panel="$PWD/test-results/fixtures/management.html"
+            if [ "$pair" = current ]; then
+              cpa="$cpa-8.0.77"
+              panel="$PWD/test-results/fixtures/management-1.28.1.html"
+            fi
+            python3 tests/integration.py --plugin dist/quota-guard.so --cpa "$cpa" --panel "$panel" --report "test-results/$pair-integration-report.json"
+            python3 tests/install_integration.py --runtime process --plugin dist/quota-guard.so --cpa "$cpa" --panel "$panel" --report "test-results/$pair-install-process-report.json"
+            sudo "$(command -v python3)" tests/install_integration.py --runtime systemd --plugin dist/quota-guard.so --cpa "$cpa" --panel "$panel" --report "test-results/$pair-install-systemd-report.json"
+          done
       - name: Install browser dependencies
         if: matrix.go == '1.27.3'
         run: |
@@ -58,17 +63,25 @@ jobs:
       - name: Real CPAMC login, bridge and iframe smoke
         if: matrix.go == '1.27.3'
         run: |
-          python3 tests/integration.py --plugin dist/quota-guard.so --cpa "$PWD/test-results/fixtures/cli-proxy-api" --panel "$PWD/test-results/fixtures/management.html" --serve > test-results/browser-fixture.log 2>&1 &
-          fixture_pid=$!
-          trap 'kill "$fixture_pid" 2>/dev/null || true' EXIT
-          fixture_ready=false
-          for attempt in $(seq 1 240); do
-            if grep -q BROWSER_FIXTURE_READY test-results/browser-fixture.log && curl --fail --silent http://127.0.0.1:18317/management.html > /dev/null; then fixture_ready=true; break; fi
-            if ! kill -0 "$fixture_pid" 2>/dev/null; then cat test-results/browser-fixture.log; exit 1; fi
-            sleep 1
-          done
-          if [ "$fixture_ready" != true ]; then cat test-results/browser-fixture.log; exit 1; fi
-          node tests/browser-regression.mjs --url http://127.0.0.1:18317/management.html --key quota-guard-integration-only
+          smoke() (
+            set -e
+            log="test-results/browser-fixture-$1.log"
+            python3 tests/integration.py --plugin dist/quota-guard.so --cpa "$PWD/test-results/fixtures/$2" --panel "$PWD/test-results/fixtures/$3" --serve > "$log" 2>&1 &
+            fixture_pid=$!
+            trap 'kill "$fixture_pid" 2>/dev/null || true' EXIT
+            fixture_ready=false
+            for attempt in $(seq 1 240); do
+              if grep -q BROWSER_FIXTURE_READY "$log" && curl --fail --silent http://127.0.0.1:18317/management.html > /dev/null; then fixture_ready=true; break; fi
+              if ! kill -0 "$fixture_pid" 2>/dev/null; then cat "$log"; exit 1; fi
+              sleep 1
+            done
+            if [ "$fixture_ready" != true ]; then cat "$log"; exit 1; fi
+            node tests/browser-regression.mjs --url http://127.0.0.1:18317/management.html --key quota-guard-integration-only --output "test-results/browser/$1"
+            kill "$fixture_pid"
+            wait "$fixture_pid" || true
+          )
+          smoke legacy cli-proxy-api management.html
+          smoke current cli-proxy-api-8.0.77 management-1.28.1.html
       - name: Package only after verification
         run: |
           python3 scripts/package_release.py
@@ -91,6 +104,6 @@ jobs:
           name: isolated-test-evidence
           path: |
             test-results/*report.json
-            test-results/browser-fixture.log
+            test-results/browser-fixture-*.log
             test-results/browser/
           if-no-files-found: ignore

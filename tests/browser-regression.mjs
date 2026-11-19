@@ -5,8 +5,8 @@ import {createServer} from 'node:http';
 import {resolve,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {chromium} from 'playwright';
-const root=resolve(dirname(fileURLToPath(import.meta.url)),'..'),output=resolve(root,'test-results/browser');mkdirSync(output,{recursive:true});
 const args=process.argv.slice(2),arg=name=>{const i=args.indexOf(name);return i<0?undefined:args[i+1];};
+const root=resolve(dirname(fileURLToPath(import.meta.url)),'..'),output=resolve(root,arg('--output')||'test-results/browser');mkdirSync(output,{recursive:true});
 const at=hours=>new Date(Date.now()+hours*3600000).toISOString();
 const p={revision:10,mode:'enforce',poll_seconds:60,max_age_seconds:180,timeout_seconds:10,safety_percent:3,resume_gap_percent:5,unknown_action:'allow',strategy:'round-robin',rules:[{account:'a.json',enabled:false,min_remaining_percent:20},{account:'b.json',enabled:false,min_remaining_percent:20}],auto_reset:{enabled:true,before_hours:6,include_new_accounts:false,accounts:{'a.json':true}}};
 const fixture={version:'0.3.0',policy:p,accounts:[
@@ -115,7 +115,12 @@ try {
      const password=live.locator('input[type=password]').first();if(await password.count()){await password.fill(arg('--key')||process.env.QUOTA_GUARD_TEST_KEY||'quota-guard-integration-only');const submit=live.getByRole('button',{name:/登录|连接|Connect|Login|Sign in/i});await submit.last().click();}
      await live.getByText('账号额度保护',{exact:true}).last().click();
    }
-   await iframe().waitFor();const embedded=live.frameLocator('iframe[src*="quota-guard"]');await embedded.locator('#content').waitFor({state:'visible'});await embedded.locator('#settings-tab').click();const mode=embedded.locator('[data-field=mode]'),old=await mode.inputValue();await mode.selectOption(old==='observe'?'enforce':'observe');await embedded.locator('#save-bottom').click();await embedded.locator('#message').filter({hasText:'设置已保存'}).waitFor();await mode.selectOption(old);await embedded.locator('#save-bottom').click();await embedded.locator('#savebar').waitFor({state:'hidden'});await embedded.locator('#probe').click();
+   await iframe().waitFor();const embedded=live.frameLocator('iframe[src*="quota-guard"]');await embedded.locator('#content').waitFor({state:'visible'});await embedded.locator('#settings-tab').click();
+   const schedule=embedded.locator('#activate-daily-times'),old=await schedule.inputValue(),example=old==='16:00, 19:00'?'08:00, 11:00':'16:00, 19:00';
+   const save=async value=>{await schedule.fill(value);await embedded.locator('#save-bottom').click();await embedded.locator('#savebar').waitFor({state:'hidden'});};
+   await save(example);
+   await live.reload();await iframe().waitFor();await embedded.locator('#content').waitFor({state:'visible'});await embedded.locator('#settings-tab').click();assert.equal(await schedule.inputValue(),example);
+   await save(old);await embedded.locator('#probe').click();
    // Drive the real parent's theme source; its installed bridge must propagate it.
    await live.evaluate(()=>document.documentElement.setAttribute('data-theme','dark'));await embedded.locator('html[data-theme=dark]').waitFor();await live.setViewportSize({width:390,height:844});assert.ok(await embedded.locator('body').evaluate(n=>n.scrollWidth<=window.innerWidth));await live.screenshot({path:resolve(output,'isolated-cpa-mobile.png'),fullPage:true});assert.deepEqual(liveErrors,[]);checks.push('real isolated CPA login, bridge read/save/refresh, theme and mobile smoke');console.log('PASS '+checks.at(-1));await live.close();
  }

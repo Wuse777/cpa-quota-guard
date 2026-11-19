@@ -8,7 +8,7 @@ The upstream MIT license and original copyright lines are preserved in
 licenses/CLIProxyAPI-MIT.txt.
 
 The UI typography, spacing, control states, and motion are adapted from
-Cli-Proxy-API-Management-Center v1.26.5.
+Cli-Proxy-API-Management-Center v1.26.5 and v1.28.1.
 Upstream: https://github.com/router-for-me/Cli-Proxy-API-Management-Center
 Copyright (c) 2026 Router-For.ME. MIT license.
 See licenses/CPAMC-MIT.txt. The upstream management HTML is not redistributed.

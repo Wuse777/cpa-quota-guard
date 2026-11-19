@@ -17,6 +17,7 @@ import yaml
 from cpamc_bridge import inject_session_bridge, panel_diagnostics
 
 VERSION = "0.5.0"
+SUPPORTED_CPA = ("8.0.35", "8.0.77")
 ROOT = Path(__file__).resolve().parent
 
 
@@ -141,7 +142,7 @@ def validate_artifact(binary, manifest_path=None):
 
 
 def plugin_preflight(config, directory, host_plugins=None, declarations=None):
-    """Host flags are preferred; CPA 8.0.35 needs binary-bound declarations.
+    """When the host does not report capabilities, use binary-bound declarations.
 
     A plugin name, menu or priority is never evidence that it has no scheduler.
     """
@@ -369,8 +370,9 @@ def main():
     if not key:
         raise SystemExit("Supply the actual management key via --management-key-file before applying")
     baseline = snapshot_runtime(port, key)
-    if str(baseline["cpa_version"]).lstrip("v") != "8.0.35":
-        raise SystemExit("Unsupported CPA version; expected verified 8.0.35 before changing files")
+    if str(baseline["cpa_version"]).removeprefix("v") not in SUPPORTED_CPA:
+        raise SystemExit("Unsupported CPA version; expected a verified version before changing files: "
+                         + " or ".join(SUPPORTED_CPA))
     import pwd
     account = pwd.getpwnam(args.service_user)
     created_plugin_dir = not directory.exists()

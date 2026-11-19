@@ -17,13 +17,26 @@ FIXTURES = {
         'sha256': '1d9edde6973e8f15694debcd186b5ab693e0741bd6a4c5e551aa89e0a6b57e38',
         'filename': 'CLIProxyAPI_8.0.35_linux_amd64.tar.gz',
     },
+    'cpa_archive_8_0_77': {
+        'url': 'https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.77/CLIProxyAPI_8.0.77_linux_amd64.tar.gz',
+        'sha256': '1a7ea3f968c414ed9839facfdb1c0efe34cf3038b75b2e118db143d04de1aeb3',
+        'filename': 'CLIProxyAPI_8.0.77_linux_amd64.tar.gz',
+    },
     'panel': {
         'url': 'https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/download/v1.26.5/management.html',
         'sha256': '57558cd023475674634a114824b014d3e5ac161f6f3791e3d86b6adab962a700',
         'filename': 'management.html',
     },
+    'panel_1_28_1': {
+        'url': 'https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/download/v1.28.1/management.html',
+        'sha256': 'c00ac5577db8feb12d37de6ecb783cf919bb81536902308079f754337d7a7bc5',
+        'filename': 'management-1.28.1.html',
+    },
 }
-CPA_BINARY_SHA256 = '7d2fff1780cf680704ed9df1204c4d7362d21f1c7ec7788de4f1a2394c025583'
+CPA_BINARIES = {
+    'cli-proxy-api': ('cpa_archive', '7d2fff1780cf680704ed9df1204c4d7362d21f1c7ec7788de4f1a2394c025583'),
+    'cli-proxy-api-8.0.77': ('cpa_archive_8_0_77', 'a653044124e5600fbb73208a2b541521d010c4bccafda676e128be75d43741ab'),
+}
 
 
 def digest(path):
@@ -55,19 +68,22 @@ def fetch(output):
                 temporary_path.unlink()
                 raise ValueError('Pinned upstream SHA256 mismatch: ' + fixture['filename'])
             temporary_path.replace(target)
-    binary = output / 'cli-proxy-api'
-    with tarfile.open(output / FIXTURES['cpa_archive']['filename']) as archive:
-        members = [item for item in archive.getmembers() if Path(item.name).name == 'cli-proxy-api']
-        if len(members) != 1 or not members[0].isfile():
-            raise ValueError('Expected one regular CPA binary in fixture archive')
-        data = archive.extractfile(members[0]).read()
-        if hashlib.sha256(data).hexdigest() != CPA_BINARY_SHA256:
-            raise ValueError('Pinned CPA binary SHA256 mismatch')
-        binary.write_bytes(data)
-        binary.chmod(0o755)
-    (output / 'FIXTURES.json').write_text(json.dumps({'cpa_version': '8.0.35', 'cpamc_version': '1.26.5',
-        'cpa_binary_sha256': CPA_BINARY_SHA256, 'sources': FIXTURES}, indent=2) + '\n')
-    return binary.resolve(), (output / 'management.html').resolve()
+    for name, (archive_key, sha256) in CPA_BINARIES.items():
+        binary = output / name
+        with tarfile.open(output / FIXTURES[archive_key]['filename']) as archive:
+            members = [item for item in archive.getmembers() if Path(item.name).name == 'cli-proxy-api']
+            if len(members) != 1 or not members[0].isfile():
+                raise ValueError('Expected one regular CPA binary in fixture archive')
+            data = archive.extractfile(members[0]).read()
+            if hashlib.sha256(data).hexdigest() != sha256:
+                raise ValueError('Pinned CPA binary SHA256 mismatch: ' + name)
+            binary.write_bytes(data)
+            binary.chmod(0o755)
+    (output / 'FIXTURES.json').write_text(json.dumps({'cpa_versions': ['8.0.35', '8.0.77'],
+        'cpamc_versions': ['1.26.5', '1.28.1'],
+        'cpa_binary_sha256': {name: sha for name, (_, sha) in CPA_BINARIES.items()},
+        'sources': FIXTURES}, indent=2) + '\n')
+    return (output / 'cli-proxy-api').resolve(), (output / 'management.html').resolve()
 
 
 if __name__ == '__main__':

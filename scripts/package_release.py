@@ -65,7 +65,7 @@ def package(root, output, epoch=0):
     contents = {p.relative_to(root).as_posix(): p.read_bytes() for p in public_files(root)}
     manifest = {
         "schema_version": 1, "name": "cpa-quota-guard", "version": version,
-        "target": "linux-amd64-glibc", "verified_cpa": "8.0.35", "verified_cpamc": "1.26.5",
+        "target": "linux-amd64-glibc", "verified_cpa": "8.0.35 / 8.0.77", "verified_cpamc": "1.26.5 / 1.28.1",
         "build": build,
         "files": [{"path": name, "size": len(raw), "sha256": sha256(raw)} for name, raw in contents.items()],
     }

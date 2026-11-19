@@ -24,7 +24,7 @@ Independent community plugin; not affiliated with CLIProxyAPI, CPAMC, OpenAI, or
 
 ## Verified compatibility
 
-CLIProxyAPI **8.0.35**, C ABI 1 / JSON schema 6; CPAMC **1.26.5** with the exact verified HTML build. The installer rejects unknown panel hashes before making changes. The packaged library targets Linux amd64 / glibc and is built on Ubuntu 24.04. Other versions and platforms have not been verified.
+CLIProxyAPI **8.0.35 / 8.0.77** (plugin C ABI 1 / JSON schema 6); CPAMC **1.26.5 / 1.28.1** with an exact verified HTML build. The installer rejects unknown panel hashes before making changes. The packaged library targets Linux amd64 / glibc and is built on Ubuntu 24.04. Other versions and platforms have not been verified.
 
 The Linux installer requires Python 3, PyYAML, and systemd. Source builds require Go 1.23+ and a C compiler; Go 1.27.3 is used for validation.
 
@@ -46,7 +46,7 @@ The key file must contain your existing CPA management key and be readable only 
 
 **0.3.0 first-install defaults: observe quota protection, automatic credit use disabled, and new accounts excluded from automatic redemption.** The switches are independent: observe mode does not suspend reset automation once enabled. Select accounts in CPAMC before enabling, or explicitly use `--auto-reset on --reset-account example-account.json` on first installation. Upgrades preserve existing policy and journal bytes. Older policies without `include_new_accounts` retain the previous `true` behavior; review that switch after upgrading.
 
-Management-only/SSO plugins may coexist. Scheduler capability checks replace the former blanket rejection. CPA 8.0.35 lacks scheduler flags, so audited capability declarations must match the exact installed binary SHA256; unknown capabilities block apply before changes. Existing panel extensions also need exact marked-block SHA256 declarations, while the original verified CPAMC HTML hash remains mandatory. See [installation](docs/INSTALLATION.md).
+Management-only/SSO plugins may coexist. Scheduler capability checks replace the former blanket rejection. If CPA does not report scheduler flags, audited capability declarations must match the exact installed binary SHA256; unknown capabilities block apply before changes. Existing panel extensions also need exact marked-block SHA256 declarations, while the original verified CPAMC HTML hash remains mandatory. See [installation](docs/INSTALLATION.md).
 
 ## Important behavior
 

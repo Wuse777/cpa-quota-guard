@@ -25,7 +25,7 @@ bash build.sh
 python3 scripts/fetch_fixtures.py
 ```
 
-下载官方 CPA **8.0.35** Linux amd64 与 CPAMC **1.26.5**，使用固定版本 URL，校验归档、二进制及面板 SHA256。源地址/摘要在脚本中，夹具只写入 Git 忽略的 `test-results/fixtures/`。不使用 latest；校验失败立即停止，不自动信任新摘要。也可使用自己已验证的绝对路径传入后续测试。
+下载官方 CPA **8.0.35 / 8.0.77** Linux amd64 与 CPAMC **1.26.5 / 1.28.1**，使用固定版本 URL，校验归档、二进制及面板 SHA256。源地址/摘要在脚本中，夹具只写入 Git 忽略的 `test-results/fixtures/`。不使用 latest；校验失败立即停止，不自动信任新摘要。也可使用自己已验证的绝对路径传入后续测试。
 
 ## 真实 CPA 隔离集成
 

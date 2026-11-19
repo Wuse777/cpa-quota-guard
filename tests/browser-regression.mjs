@@ -123,7 +123,7 @@ try {
    };
    await openSettings();
    const schedule=embedded.locator('#activate-daily-times'),old=await schedule.inputValue(),example=old==='16:00, 19:00'?'08:00, 11:00':'16:00, 19:00';
-   const save=async value=>{await schedule.fill(value);await embedded.locator('#save-bottom').click();await embedded.locator('#savebar').waitFor({state:'hidden'});};
+   const save=async value=>{await schedule.fill(value);await embedded.locator('#save').click();await embedded.locator('#savebar').waitFor({state:'hidden'});};
    await save(example);
    await live.reload();await openSettings();assert.equal(await schedule.inputValue(),example);
    await save(old);await embedded.locator('#probe').click();

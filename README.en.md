@@ -1,6 +1,6 @@
 # CPA Quota Guard
 
-Per-account quota reserves, automatic use of expiring Codex reset credits, and activation after quota resets for CLIProxyAPI, configured inside CPAMC.
+Per-account quota reserves, automatic use of expiring Codex reset credits, and quota activation after resets or on a daily schedule for CLIProxyAPI, configured inside CPAMC.
 
 [中文](README.md) · [Installation](docs/INSTALLATION.md) · [Configuration](docs/CONFIGURATION.md) · [Testing](docs/TESTING.md)
 
@@ -34,8 +34,8 @@ Obtain a trusted archive and `SHA256SUMS`, or build from source and run `scripts
 
 ```bash
 sha256sum -c SHA256SUMS
-tar -xzf cpa-quota-guard_0.4.0_linux_amd64.tar.gz
-cd cpa-quota-guard-0.4.0
+tar -xzf cpa-quota-guard_0.5.0_linux_amd64.tar.gz
+cd cpa-quota-guard-0.5.0
 sha256sum -c dist/SHA256SUMS
 python3 install.py  # read-only plan
 python3 install.py --doctor  # independent compatibility/build diagnosis
@@ -50,7 +50,7 @@ Management-only/SSO plugins may coexist. Scheduler capability checks replace the
 
 ## Important behavior
 
-The new `auto_activate` feature defaults to off when installing or upgrading. Enable it and select accounts in CPAMC. Natural resets and manual/automatic credit resets are detected from successful quota observations; ordinary refresh queries do not themselves trigger generation. Requests use a fixed account and a minimal payload, respect quota protection, and never automatically resend an ambiguous result. Actual activation token usage is saved in the plugin journal rather than CPA's ordinary usage reporter. The UI distinguishes a completed model call from a subsequently confirmed quota timer. See [configuration](docs/CONFIGURATION.md).
+The new `auto_activate` feature defaults to off when installing or upgrading. Enable it and select accounts in CPAMC. Natural resets and manual/automatic credit resets are detected from successful quota observations; ordinary refresh queries do not themselves trigger generation. Requests use a fixed account and a minimal payload, respect quota protection, and never automatically resend an ambiguous result. Actual activation token usage is saved in the plugin journal rather than CPA's ordinary usage reporter. The UI distinguishes a completed model call from a subsequently confirmed quota timer. You can also schedule several daily checks in Beijing time (UTC+8), for example `16:00, 19:00`. A check can start an idle quota window, but does not extend an already active one. Disable both refresh triggers if you want to wait for scheduled checks. See [configuration](docs/CONFIGURATION.md).
 
 Quota protection is best-effort. In-flight requests, other clients, delayed quota data, and host fallback can still spend quota. A protected window pauses the whole account; plugin scheduling replaces native selection for matching enabled rules.
 

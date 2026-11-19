@@ -4,6 +4,13 @@
   const copy = value => JSON.parse(JSON.stringify(value));
   const validDate = value => !!value && !String(value).startsWith('0001-') && Number.isFinite(Date.parse(value));
   const keys = account => [account.name, account.id, account.auth_index].filter(Boolean);
+  const dailyTimes = input => input.trim() ? input.split(/[,，\n]/).map(value => value.trim()).sort() : [];
+  function dailyTimesError(times) {
+    if (times.length > 24) return '每日最多设置 24 个时间点';
+    if (times.some(value => !/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(value))) return '请用逗号分隔 HH:mm 格式的时间，例如 16:00, 19:00';
+    if (new Set(times).size !== times.length) return '时间点不能重复';
+    return '';
+  }
   function policy(value) {
     const result = copy(value || {});
     result.rules ||= [];
@@ -12,6 +19,7 @@
     result.auto_reset.include_new_accounts ??= false;
     result.auto_activate ||= {};
     for (const [key,value] of Object.entries({enabled:false,include_new_accounts:false,natural:true,reset:true,five_hour:true,weekly:true,model:''})) result.auto_activate[key] ??= value;
+    result.auto_activate.daily_times = (result.auto_activate.daily_times || []).slice().sort();
     result.auto_activate.accounts ||= {};
     result.auto_activate.account_models ||= {};
     return result;
@@ -109,5 +117,5 @@
     return filter === 'all' || filter === 'enabled' && !a.disabled || filter === 'disabled' && a.disabled ||
       filter === 'protected' && snapshot.would_block || filter === 'attention' && !a.disabled && (['error','stale','unknown'].includes(h) || ['blocked','error'].includes(scheduler(snapshot)) || activationAttention(snapshot));
   }
-  globalThis.QuotaUI = {copy,validDate,keys,policy,ruleFor,autoEnabled,activationEnabled,activationModelFor,activationAttention,activationWindow,health,liveCredits,scheduler,actionable,summary,threshold,changes,groups,activationGroups,accountMatches};
+  globalThis.QuotaUI = {copy,validDate,keys,policy,dailyTimes,dailyTimesError,ruleFor,autoEnabled,activationEnabled,activationModelFor,activationAttention,activationWindow,health,liveCredits,scheduler,actionable,summary,threshold,changes,groups,activationGroups,accountMatches};
 })();

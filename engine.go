@@ -362,19 +362,29 @@ func (e *engine) status() any {
 	sort.Slice(statuses, func(i, j int) bool { return statuses[i].Account.Name < statuses[j].Account.Name })
 	_, events, resetError := e.resetView(account{})
 	_, activationEvents, activationError := e.activationView(account{}, e.p.AutoActivate)
+	var nextScheduledActivation *time.Time
+	if activationError == "" {
+		e.activationMu.Lock()
+		_, next := activationSchedule(e.p.AutoActivate, time.Now(), e.activationJournal.completedSchedule())
+		e.activationMu.Unlock()
+		if !next.IsZero() {
+			nextScheduledActivation = &next
+		}
+	}
 	return struct {
-		Version          string             `json:"version"`
-		Policy           policy             `json:"policy"`
-		Accounts         []accountStatus    `json:"accounts"`
-		RefreshError     string             `json:"refresh_error,omitempty"`
-		ResetEvents      []resetEvent       `json:"reset_events"`
-		ResetError       string             `json:"reset_error,omitempty"`
-		Build            buildInfo          `json:"build"`
-		Health           engineHealth       `json:"health"`
-		Notifications    notificationStatus `json:"notifications"`
-		ActivationEvents []activationEvent  `json:"activation_events"`
-		ActivationError  string             `json:"activation_error,omitempty"`
-	}{version, e.p, statuses, e.lastRefreshError, events, resetError, buildInfo{version, buildCommit, buildTime, runtime.Version(), "0.4.0", "8.0.35 / C ABI 1 / schema 6", "1.26.5 (verified HTML build)"}, e.health, e.notificationsView(), activationEvents, activationError}
+		Version                 string             `json:"version"`
+		Policy                  policy             `json:"policy"`
+		Accounts                []accountStatus    `json:"accounts"`
+		RefreshError            string             `json:"refresh_error,omitempty"`
+		ResetEvents             []resetEvent       `json:"reset_events"`
+		ResetError              string             `json:"reset_error,omitempty"`
+		Build                   buildInfo          `json:"build"`
+		Health                  engineHealth       `json:"health"`
+		Notifications           notificationStatus `json:"notifications"`
+		ActivationEvents        []activationEvent  `json:"activation_events"`
+		ActivationError         string             `json:"activation_error,omitempty"`
+		NextScheduledActivation *time.Time         `json:"next_scheduled_activation,omitempty"`
+	}{version, e.p, statuses, e.lastRefreshError, events, resetError, buildInfo{version, buildCommit, buildTime, runtime.Version(), "0.4.0", "8.0.35 / C ABI 1 / schema 6", "1.26.5 (verified HTML build)"}, e.health, e.notificationsView(), activationEvents, activationError, nextScheduledActivation}
 }
 
 var errRevision = errors.New("配置已被其他页面修改，请刷新后重试")
@@ -383,6 +393,8 @@ func (e *engine) updatePolicy(p policy) error {
 	if err := validatePolicy(p); err != nil {
 		return err
 	}
+	p.AutoActivate.DailyTimes = append([]string(nil), p.AutoActivate.DailyTimes...)
+	sort.Strings(p.AutoActivate.DailyTimes)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if p.Revision != e.p.Revision {

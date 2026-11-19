@@ -9,6 +9,6 @@
   "unknown_action": "block",
   "strategy": "round-robin",
   "auto_reset": {"enabled": false, "before_hours": 6, "include_new_accounts": false, "accounts": {}},
-  "auto_activate": {"enabled": false, "include_new_accounts": false, "natural": true, "reset": true, "five_hour": true, "weekly": true, "model": "", "accounts": {}, "account_models": {}},
+  "auto_activate": {"enabled": false, "include_new_accounts": false, "natural": true, "reset": true, "daily_times": [], "five_hour": true, "weekly": true, "model": "", "accounts": {}, "account_models": {}},
   "rules": []
 }

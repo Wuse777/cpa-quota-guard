@@ -81,6 +81,24 @@ try {
    await frame.locator('#events-tab').click();assert.equal(await frame.locator('.activation-operation').count(),2);assert.match(await text('#activation-events'),/计时已确认/);assert.match(await text('#activation-events'),/结果待核实/);await frame.locator('.activation-operation').first().locator('summary').click();assert.match(await text('#activation-events'),/不会自动重复发送/);
    await frame.locator('#event-filter').selectOption('success');assert.equal(await frame.locator('.activation-operation').count(),1);await frame.locator('.activation-operation').first().locator('summary').click();assert.match(await text('#activation-events'),/输入 8 · 输出 1 token/);assert.match(await text('#activation-events'),/思考 none/);await frame.locator('#event-filter').selectOption('attention');assert.equal(await frame.locator('.activation-operation').count(),1);assert.match(await text('#activation-events'),/结果待核实/);await frame.locator('#event-filter').selectOption('all');await frame.locator('#accounts-tab').click();
  });
+ await check('multiple daily activation times validate, save in order, and display in Beijing time',async()=>{
+   await frame.locator('#settings-tab').click();
+   const input=frame.locator('#activate-daily-times'),saves=await page.evaluate(()=>window.calls.policy);
+   await input.fill('19:00，24:00');assert.equal(await input.evaluate(n=>n.validity.valid),false);
+   await frame.locator('#save-bottom').click();assert.equal(await page.evaluate(()=>window.calls.policy),saves);
+   await input.fill('19:00，16:00, 20:30');assert.equal(await input.evaluate(n=>n.validity.valid),true);
+   await page.evaluate(()=>{
+     window.fixture.next_scheduled_activation='2030-01-02T08:00:00Z';
+     window.fixture.activation_events[1].scheduled_at='2030-01-01T11:00:00Z';
+   });
+   await frame.locator('#save-bottom').click();await frame.locator('#savebar').waitFor({state:'hidden'});
+   assert.deepEqual(await page.evaluate(()=>window.fixture.policy.auto_activate.daily_times),['16:00','19:00','20:30']);
+   assert.match(await text('#activation-next'),/2030\/1\/2 16:00.*北京时间/);
+   await frame.locator('#events-tab').click();
+   const scheduled=frame.locator('.activation-operation').filter({hasText:'结果待核实'});
+   await scheduled.locator('summary').click();assert.match(await scheduled.innerText(),/定时 2030\/1\/1 19:00.*北京时间/);
+   await frame.locator('#accounts-tab').click();
+ });
  await check('light, dark, and narrow layouts render without horizontal overflow',async()=>{
    await page.reload();await frame.locator('#content').waitFor({state:'visible'});await page.evaluate(()=>window.setTheme('light'));await page.screenshot({path:resolve(output,'light.png'),fullPage:true});
    await page.evaluate(()=>window.setTheme('dark'));await frame.locator('html[data-theme="dark"]').waitFor();await page.screenshot({path:resolve(output,'dark.png'),fullPage:true});

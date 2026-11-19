@@ -40,7 +40,7 @@ test('operation grouping preserves a chronological timeline and separates operat
 });
 test('older policies receive disabled activation defaults without changing reset settings',()=>{
  const old={revision:4,auto_reset:{enabled:true,accounts:{'a.json':true}}};const normalized=M.policy(old);
- assert.deepEqual(JSON.parse(JSON.stringify(normalized.auto_activate)),{enabled:false,include_new_accounts:false,natural:true,reset:true,five_hour:true,weekly:true,model:'',accounts:{},account_models:{}});
+ assert.deepEqual(JSON.parse(JSON.stringify(normalized.auto_activate)),{enabled:false,include_new_accounts:false,natural:true,reset:true,five_hour:true,weekly:true,model:'',daily_times:[],accounts:{},account_models:{}});
  assert.equal(normalized.auto_reset.enabled,true);assert.equal(old.auto_activate,undefined);
  const partial=M.policy({auto_activate:{natural:false,weekly:false,model:'test-mini'}});assert.equal(partial.auto_activate.natural,false);assert.equal(partial.auto_activate.weekly,false);assert.equal(partial.auto_activate.enabled,false);
 });
@@ -64,4 +64,15 @@ test('uncertain activation participates in attention filters even with healthy q
 test('activation timelines group task IDs and retain confirmation separately from successful calls',()=>{
  const rows=[{id:'one',account:'a.json',at:'2026-11-16T00:01:00Z',state:'succeeded',confirmed:false},{id:'one',account:'a.json',at:'2026-11-16T00:02:00Z',state:'succeeded',confirmed:true},{id:'two',account:'a.json',at:'2026-11-16T00:03:00Z',state:'uncertain'}];
  const groups=M.activationGroups(rows);assert.equal(groups.length,2);assert.equal(groups[0].latest.state,'uncertain');assert.equal(groups[1].events.length,2);assert.equal(groups[1].events[0].confirmed,false);assert.equal(groups[1].latest.confirmed,true);
+});
+
+test('daily schedule accepts multiple Beijing times and preserves validation errors',()=>{
+ const times=M.dailyTimes(' 19:00， 00:00,16:00 ');
+ assert.equal(JSON.stringify(times),JSON.stringify(['00:00','16:00','19:00']));
+ assert.equal(M.dailyTimesError(times),'');
+ for(const input of ['9:00','24:01','10:75','11:00,','11:00,11:00']) assert.notEqual(M.dailyTimesError(M.dailyTimes(input)),'');
+ assert.equal(JSON.stringify(M.dailyTimes('   ')),'[]');
+ assert.equal(M.dailyTimesError(M.dailyTimes('00:00,23:59')),'');
+ const edited=M.policy({...p,auto_activate:{...p.auto_activate,daily_times:times}});
+ assert.equal(M.changes(p,edited,[active]).impacted,1);
 });

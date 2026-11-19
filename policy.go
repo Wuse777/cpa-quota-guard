@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -110,6 +111,7 @@ func loadPolicy(dir string) (policy, error) {
 	if err = decodeJSON(raw, &p); err != nil {
 		return p, fmt.Errorf("policy.json 无效: %w", err)
 	}
+	sort.Strings(p.AutoActivate.DailyTimes)
 	return p, validatePolicy(p)
 }
 

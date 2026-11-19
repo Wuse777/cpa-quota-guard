@@ -18,6 +18,7 @@ import (
 type activationPolicy struct {
 	Enabled            bool              `json:"enabled"`
 	IncludeNewAccounts bool              `json:"include_new_accounts"`
+	DailyTimes         []string          `json:"daily_times,omitempty"`
 	Natural            bool              `json:"natural"`
 	Reset              bool              `json:"reset"`
 	FiveHour           bool              `json:"five_hour"`
@@ -32,6 +33,9 @@ func defaultActivationPolicy() activationPolicy {
 }
 
 func validateActivationPolicy(p activationPolicy) error {
+	if err := validateActivationTimes(p.DailyTimes); err != nil {
+		return err
+	}
 	if len(p.Accounts) > 10000 || len(p.AccountModels) > 10000 {
 		return errors.New("自动激活账号设置过多")
 	}
@@ -89,18 +93,19 @@ type activationCallResult struct {
 	Ambiguous    bool   `json:"ambiguous"`
 }
 type activationEvent struct {
-	ID           string    `json:"id"`
-	Account      string    `json:"account"`
-	At           time.Time `json:"at"`
-	State        string    `json:"state"`
-	Reason       string    `json:"reason"`
-	Windows      []string  `json:"windows"`
-	Model        string    `json:"model,omitempty"`
-	Reasoning    string    `json:"reasoning,omitempty"`
-	InputTokens  int64     `json:"input_tokens"`
-	OutputTokens int64     `json:"output_tokens"`
-	Error        string    `json:"error,omitempty"`
-	Confirmed    bool      `json:"confirmed"`
+	ID           string     `json:"id"`
+	Account      string     `json:"account"`
+	At           time.Time  `json:"at"`
+	ScheduledAt  *time.Time `json:"scheduled_at,omitempty"`
+	State        string     `json:"state"`
+	Reason       string     `json:"reason"`
+	Windows      []string   `json:"windows"`
+	Model        string     `json:"model,omitempty"`
+	Reasoning    string     `json:"reasoning,omitempty"`
+	InputTokens  int64      `json:"input_tokens"`
+	OutputTokens int64      `json:"output_tokens"`
+	Error        string     `json:"error,omitempty"`
+	Confirmed    bool       `json:"confirmed"`
 }
 type activationAccountStatus struct {
 	Enabled    bool              `json:"enabled"`
@@ -122,11 +127,12 @@ type activationWindow struct {
 	Reason        string    `json:"reason"`
 }
 type activationIdentity struct {
-	Windows       map[string]activationWindow `json:"windows"`
-	Pending       string                      `json:"pending,omitempty"`
-	ResetSignal   string                      `json:"reset_signal,omitempty"`
-	ResetSignalAt time.Time                   `json:"reset_signal_at,omitempty"`
-	AppliedReset  string                      `json:"applied_reset,omitempty"`
+	LastScheduleAt *time.Time                  `json:"last_schedule_at,omitempty"`
+	Windows        map[string]activationWindow `json:"windows"`
+	Pending        string                      `json:"pending,omitempty"`
+	ResetSignal    string                      `json:"reset_signal,omitempty"`
+	ResetSignalAt  time.Time                   `json:"reset_signal_at,omitempty"`
+	AppliedReset   string                      `json:"applied_reset,omitempty"`
 }
 type activationOperation struct {
 	activationEvent
@@ -137,10 +143,11 @@ type activationOperation struct {
 	Preference string            `json:"preference,omitempty"`
 }
 type activationJournal struct {
-	Version    int                            `json:"version"`
-	Identities map[string]*activationIdentity `json:"identities"`
-	Operations map[string]activationOperation `json:"operations"`
-	Events     []activationEvent              `json:"events"`
+	Version             int                            `json:"version"`
+	CompletedScheduleAt *time.Time                     `json:"completed_schedule_at,omitempty"`
+	Identities          map[string]*activationIdentity `json:"identities"`
+	Operations          map[string]activationOperation `json:"operations"`
+	Events              []activationEvent              `json:"events"`
 }
 
 func emptyActivationJournal() activationJournal {
@@ -402,7 +409,10 @@ func (e *engine) observeActivationLocked(identity string, s snapshot, p activati
 		st = &activationIdentity{Windows: map[string]activationWindow{}}
 		e.activationJournal.Identities[identity] = st
 	}
-	applyReset := p.Reset && st.ResetSignal != "" && st.AppliedReset != st.ResetSignal && !s.CheckedAt.Before(st.ResetSignalAt)
+	trackSchedule := activationScheduleEnabled(p)
+	trackNatural := p.Natural || trackSchedule
+	trackReset := p.Reset || trackSchedule
+	applyReset := trackReset && st.ResetSignal != "" && st.AppliedReset != st.ResetSignal && !s.CheckedAt.Before(st.ResetSignalAt)
 	resetReady := applyReset
 	for _, b := range s.Buckets {
 		if activationKind(b) != "" && b.RemainingPercent < 99.999999 {
@@ -431,7 +441,7 @@ func (e *engine) observeActivationLocked(identity string, s snapshot, p activati
 		}
 		if !exists {
 			w = activationWindow{Cycle: "initial:" + k, Handled: true}
-			if idle && !b.ResetAt.After(now) && p.Natural && activationSelected(p, k) {
+			if idle && !b.ResetAt.After(now) && trackNatural && activationSelected(p, k) {
 				w.Handled = false
 				w.Reason = "首次启用时窗口满额且尚未启动"
 			}
@@ -444,19 +454,23 @@ func (e *engine) observeActivationLocked(identity string, s snapshot, p activati
 			manual := w.ObservedUse && changed
 			initialMoved := w.Cycle == "initial:"+k && activationIdle(old, now) &&
 				!w.ObservedUse && !w.ActiveUntil.IsZero() && changed && !e.activationCycleSentLocked(identity, k, w.Cycle)
-			if natural && p.Natural {
+			if natural && trackNatural {
 				w.Cycle = "natural:" + fmt.Sprint(boundary)
 				w.Handled = false
 				w.Reason = "自然额度刷新后的窗口激活"
 				w.Boundary = boundary
 				w.ObservedUse = false
-			} else if !natural && initialMoved && p.Natural {
+			} else if trackSchedule && !natural && w.Cycle == "initial:"+k && w.Reason == "" && w.ActiveUntil.IsZero() &&
+				!b.ResetAt.After(now) && !w.ObservedUse && !e.activationCycleSentLocked(identity, k, w.Cycle) {
+				w.Handled = false
+				w.Reason = "窗口满额且尚未启动"
+			} else if !natural && initialMoved && trackNatural {
 				// Full future timers that move with queries are not evidence of use.
 				// Reuse the initial cycle so drift and restarts cannot cause repeats.
 				w.Handled = false
 				w.Reason = "满额窗口未来重置时间变化，激活尚未启动的周期"
 				w.Boundary = boundary
-			} else if !natural && manual && p.Reset {
+			} else if !natural && manual && trackReset {
 				// An observed used-to-full transition before expiry is an external/manual reset.
 				if old.ResetAt.IsZero() || old.ResetAt.After(now) {
 					w.Cycle = "observed-reset:" + fmt.Sprint(w.ActiveUntil.Unix())
@@ -731,13 +745,31 @@ func activationQuotaReady(s snapshot, p policy, now time.Time) error {
 func (e *engine) activationDelay(now time.Time) time.Duration {
 	e.mu.Lock()
 	p := e.p.AutoActivate
-	e.mu.Unlock()
-	if !p.Enabled || !p.Natural {
-		return time.Minute
+	hasScheduleAccounts := false
+	if activationScheduleEnabled(p) {
+		for _, s := range e.snapshots {
+			if activationEnabled(p, s.Account) {
+				hasScheduleAccounts = true
+				break
+			}
+		}
 	}
+	e.mu.Unlock()
 	delay := time.Minute
 	e.activationMu.Lock()
 	defer e.activationMu.Unlock()
+	if hasScheduleAccounts && e.activationError == "" {
+		due, next := activationSchedule(p, now, e.activationJournal.completedSchedule())
+		if !due.IsZero() {
+			return 0
+		}
+		if !next.IsZero() && next.Sub(now) < delay {
+			delay = next.Sub(now)
+		}
+	}
+	if !p.Enabled || !p.Natural {
+		return delay
+	}
 	for _, st := range e.activationJournal.Identities {
 		for k, w := range st.Windows {
 			if !activationSelected(p, k) || w.ActiveUntil.IsZero() || w.Handled && w.ActiveUntil.Unix() == w.Boundary {
@@ -757,6 +789,7 @@ func (e *engine) activationDelay(now time.Time) time.Duration {
 
 func (e *engine) runActivationWorker(ctx context.Context) {
 	for ctx.Err() == nil {
+		e.processScheduledActivations(ctx)
 		e.processActivations(ctx)
 		timer := time.NewTimer(e.activationDelay(time.Now()))
 		select {
@@ -766,6 +799,7 @@ func (e *engine) runActivationWorker(ctx context.Context) {
 		case <-e.activationWake:
 			timer.Stop()
 		case <-timer.C:
+			e.processScheduledActivations(ctx)
 			// The normal quota worker may use a long poll interval; verify a due
 			// boundary independently rather than waiting for its next full poll.
 			e.refreshDueActivations(ctx)
@@ -932,61 +966,95 @@ func (e *engine) processActivations(ctx context.Context) {
 		seen[identity] = true
 		lock := e.resetIdentityLock(identity)
 		lock.Lock()
-		e.processActivation(ctx, p, cfg, a, identity)
+		e.processActivation(ctx, p, cfg, a, identity, time.Time{})
 		lock.Unlock()
 	}
 }
 
-func (e *engine) processActivation(ctx context.Context, p policy, cfg runtimeConfig, a account, identity string) {
-	s, err := e.activationFreshQuota(ctx, cfg, p, a)
-	if err != nil {
-		e.setActivationStatus(a, "blocked", "调用前额度核实失败；等待下次成功查询", time.Now().Add(time.Minute))
+func (e *engine) processActivation(ctx context.Context, p policy, cfg runtimeConfig, a account, identity string, slot time.Time) {
+	scheduled := !slot.IsZero()
+	skip := func(reason string) {
+		if scheduled {
+			e.skipScheduledActivation(a, identity, slot, reason)
+		} else {
+			e.setActivationStatus(a, "blocked", reason, time.Now().Add(time.Minute))
+		}
+	}
+	if ctx.Err() != nil {
+		skip("超过定时执行时限，跳过本次调用")
 		return
 	}
-	e.mu.Lock()
-	p = e.p
-	current, exists := e.snapshots[a.ID]
-	guard := e.evaluate(a, time.Now())
-	e.mu.Unlock()
-	if !exists || !activationEnabled(p.AutoActivate, current.Account) {
+	s, err := e.activationFreshQuota(ctx, cfg, p, a)
+	if err != nil {
+		skip("调用前额度核实失败，未发送模型请求")
 		return
 	}
 	if err = activationQuotaReady(s, p, time.Now()); err != nil {
-		e.setActivationStatus(a, "blocked", err.Error(), time.Now().Add(time.Minute))
-		return
-	}
-	if guard.Protected {
-		e.setActivationStatus(a, "blocked", "额度保护生效，暂缓自动调用："+guard.Reason, time.Now().Add(time.Minute))
+		skip(err.Error())
 		return
 	}
 	currentAccount, err := e.activationCurrentAccount(a, identity)
 	if err != nil {
-		e.setActivationStatus(a, "blocked", err.Error(), time.Now().Add(time.Minute))
+		skip(err.Error())
 		return
 	}
 	a = currentAccount
 	e.mu.Lock()
 	p = e.p
-	enabled := activationEnabled(p.AutoActivate, a)
-	guard = e.evaluate(a, time.Now())
-	e.mu.Unlock()
-	if !enabled || guard.Protected {
+	now := time.Now()
+	latest, exists := e.snapshots[a.ID]
+	guard := e.evaluate(a, now)
+	reason := ""
+	switch {
+	case !exists || latest.Account.AuthIndex != a.AuthIndex || !activationEnabled(p.AutoActivate, a) || !activationEnabled(p.AutoActivate, latest.Account):
+		reason = "账号已停用或自动激活设置已变更"
+	case scheduled && (ctx.Err() != nil || !activationScheduleOpen(p.AutoActivate, slot, now)):
+		reason = "定时设置已变更或超过执行时限"
+	case guard.Protected:
+		reason = "额度保护生效，未发送模型请求：" + guard.Reason
+	case scheduled && !latest.CheckedAt.Equal(s.CheckedAt):
+		reason = "额度快照已更新，跳过本次定时调用"
+	default:
+		if err := activationQuotaReady(latest, p, now); err != nil {
+			reason = err.Error()
+		}
+	}
+	if reason != "" {
+		e.mu.Unlock()
+		skip(reason)
 		return
 	}
 	e.activationMu.Lock()
 	st := e.activationJournal.Identities[identity]
-	if e.activationError != "" || st == nil || st.Pending == "" {
+	if e.activationError != "" || st == nil || e.activationIdentities[a.ID] != identity {
 		e.activationMu.Unlock()
+		e.mu.Unlock()
+		if scheduled {
+			skip("无法确认当前账号的额度周期")
+		}
 		return
 	}
-	op := e.activationJournal.Operations[st.Pending]
-	if op.State != "pending" && !(op.State == "failed" && op.NoSend && (time.Now().After(op.RetryAt) || op.Preference != activationPreferredModel(p.AutoActivate, a))) {
-		e.activationMu.Unlock()
-		return
-	}
-	for _, k := range op.Windows {
-		if !activationCycleSelected(p.AutoActivate, k, op.Cycles[k]) {
+	var op activationOperation
+	if scheduled {
+		op = e.scheduledActivationLocked(p.AutoActivate, st, s, identity, slot, now)
+		if len(op.Windows) == 0 {
 			e.activationMu.Unlock()
+			e.mu.Unlock()
+			skip("所选额度窗口已启动，或没有足够证据确认尚未启动")
+			return
+		}
+	} else {
+		op = e.activationJournal.Operations[st.Pending]
+		ready := op.State == "pending" || op.State == "failed" && op.NoSend &&
+			(!now.Before(op.RetryAt) || op.Preference != activationPreferredModel(p.AutoActivate, a))
+		for _, k := range op.Windows {
+			if !activationCycleSelected(p.AutoActivate, k, op.Cycles[k]) {
+				ready = false
+			}
+		}
+		if !ready {
+			e.activationMu.Unlock()
+			e.mu.Unlock()
 			return
 		}
 	}
@@ -995,12 +1063,23 @@ func (e *engine) processActivation(ctx context.Context, p policy, cfg runtimeCon
 	op.NoSend = false
 	op.RetryAt = time.Time{}
 	op.Preference = activationPreferredModel(p.AutoActivate, a)
+	if scheduled {
+		// Keep at most the last sent clock record per identity; the event
+		// timeline has its own bounded retention.
+		for id, previous := range e.activationJournal.Operations {
+			if previous.Identity == identity && previous.ScheduledAt != nil && id != st.Pending {
+				delete(e.activationJournal.Operations, id)
+			}
+		}
+	}
 	e.activationJournal.Operations[op.ID] = op
 	if e.commitActivationLocked() != nil {
 		e.activationMu.Unlock()
+		e.mu.Unlock()
 		return
 	}
 	e.activationMu.Unlock()
+	e.mu.Unlock()
 	e.setActivationStatus(a, "sending", "正在发送一次最小额度模型请求", time.Time{})
 	// No policy/journal lock is held across a host callback or HTTP request.
 	callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
@@ -1024,21 +1103,19 @@ func (e *engine) processActivation(ctx context.Context, p policy, cfg runtimeCon
 		op.Error = callErr.Error()
 	}
 	op.NoSend = op.State == "failed" && !result.Ambiguous
-	if op.NoSend {
+	if op.NoSend && !scheduled {
 		op.RetryAt = time.Now().Add(5 * time.Minute)
 	}
 	e.activationMu.Lock()
 	e.activationJournal.Operations[op.ID] = op
-	for k, cycle := range op.Cycles {
-		w := st.Windows[k]
-		if w.Cycle == cycle {
-			w.Handled = !op.NoSend
-			st.Windows[k] = w
-		}
-	}
 	if !op.NoSend {
 		settleActivationWindows(st, op)
-		st.Pending = ""
+		if scheduled {
+			// Reconcile the refresh queue with the windows this call started.
+			e.queueActivationLocked(identity, a, p.AutoActivate, op.At)
+		} else {
+			st.Pending = ""
+		}
 	}
 	e.activationJournal.Events = append(e.activationJournal.Events, op.activationEvent)
 	_ = e.commitActivationLocked()

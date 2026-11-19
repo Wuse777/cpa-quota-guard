@@ -4,6 +4,7 @@
   const channel = 'quota-guard:cpamc-session:v1', pending = new Map();
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const date = value => M.validDate(value) ? new Date(value).toLocaleString('zh-CN', {hour12:false}) : '尚无记录';
+  const beijingDate = value => new Date(value).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai',hour12:false});
   const percent = value => Math.max(0,Math.min(100,Number(value)||0));
   const number = value => Number(value.toFixed(1));
   const healthLabels = {healthy:'查询正常',stale:'额度已过期',error:'查询失败',unknown:'额度未知',disabled:'账号停用',unsupported:'尚未适配'};
@@ -86,7 +87,7 @@
   const activationLabel=result => result?.confirmed===true?'计时已确认':activationLabels[result?.state]||result?.state||'等待额度刷新';
   const activationUsage=result => Number.isFinite(result?.input_tokens)||Number.isFinite(result?.output_tokens)?`输入 ${Number(result.input_tokens)||0} · 输出 ${Number(result.output_tokens)||0} token`:'未返回 token 用量';
   const activationWindows=result => (result?.windows||[]).map(M.activationWindow).join('、');
-  const activationDetails=result => [activationWindows(result),result?.model,result?.reasoning?`思考 ${result.reasoning}`:'',activationUsage(result)].filter(Boolean).join(' · ');
+  const activationDetails=result => [M.validDate(result?.scheduled_at)?`定时 ${beijingDate(result.scheduled_at)}（北京时间）`:null,activationWindows(result),result?.model,result?.reasoning?`思考 ${result.reasoning}`:'',result?.state==='skipped'?null:activationUsage(result)].filter(Boolean).join(' · ');
   const activationGood=result => result?.confirmed===true||['succeeded','confirmed','activated'].includes(result?.state);
   function syncInput(input,value) {if(input===document.activeElement)return;if(input.type==='checkbox')input.checked=!!value;else if(input.value!==String(value))input.value=value;}
   function updateDraftStatus() {
@@ -144,7 +145,7 @@
     const a=s.account;if(a.provider!=='codex')return '';
     const live=s.activation||{},r=live.last_result,modelKey=activationKey(a,'account_models'),ownModel=draft.auto_activate.account_models[modelKey]||'';
     const listID=`activate-model-${encodeURIComponent(a.id)}`,models=live.models||[];
-    return `<section class="activation-side" aria-label="${esc(a.name)}自动激活"><div class="side-title">额度刷新后自动激活<label class="toggle"><input type="checkbox" data-edit="activate" ${M.activationEnabled(draft,a)?'checked':''} ${a.disabled?'disabled':''}><span class="toggle-track" aria-hidden="true"></span><span>此账号启用</span></label></div><div class="activation-current"><span class="badge ${['uncertain','failed','blocked'].includes(live.state)?'warn':activationGood(live)?'good':''}">${esc(activationLabel(live))}</span><p>${esc(live.message||'保存后等待后台检查额度周期')}</p>${M.validDate(live.next_at)?`<small>下次检查 ${esc(date(live.next_at))}</small>`:''}</div><label class="activation-model-label">此账号调用模型<input type="text" data-edit="activate-model" aria-label="${esc(a.name)}自动激活模型" list="${esc(listID)}" value="${esc(ownModel)}" maxlength="200" autocomplete="off" placeholder="${esc(draft.auto_activate.model?`沿用默认：${draft.auto_activate.model}`:'自动选择低消耗模型')}" ${a.disabled?'disabled':''}><datalist id="${esc(listID)}">${models.map(m=>`<option value="${esc(m.id)}">最低思考：${esc(m.lowest_effort||'自动')}</option>`).join('')}</datalist></label><p class="hint">${models.length?`已发现 ${models.length} 个可用模型。`:'可用模型由后台读取。'}留空沿用默认设置，思考程度固定为最低支持档。</p>${!draft.auto_activate.enabled?'<p class="hint">自动激活总开关已关闭；账号设置保留。</p>':''}${r?`<details class="history-detail activation-result"><summary>最近激活 · ${esc(activationLabel(r))} · ${esc(date(r.at))}</summary><p class="meta">${esc(activationDetails(r))}</p>${r.reason?`<p>${esc(r.reason)}</p>`:''}${r.error?`<p class="error">${esc(r.error)}</p>`:''}${r.state==='succeeded'&&r.confirmed!==true?'<p class="hint">模型调用已完成，计时启动状态以后台后续查询为准。</p>':''}</details>`:''}</section>`;
+    return `<section class="activation-side" aria-label="${esc(a.name)}自动激活"><div class="side-title">额度自动激活<label class="toggle"><input type="checkbox" data-edit="activate" ${M.activationEnabled(draft,a)?'checked':''} ${a.disabled?'disabled':''}><span class="toggle-track" aria-hidden="true"></span><span>此账号启用</span></label></div><div class="activation-current"><span class="badge ${['uncertain','failed','blocked'].includes(live.state)?'warn':activationGood(live)?'good':''}">${esc(activationLabel(live))}</span><p>${esc(live.message||'保存后等待后台检查额度周期')}</p>${M.validDate(live.next_at)?`<small>下次检查 ${esc(date(live.next_at))}</small>`:''}${live.enabled&&M.validDate(state.next_scheduled_activation)?`<small>下次定时 ${esc(beijingDate(state.next_scheduled_activation))}（北京时间）</small>`:''}</div><label class="activation-model-label">此账号调用模型<input type="text" data-edit="activate-model" aria-label="${esc(a.name)}自动激活模型" list="${esc(listID)}" value="${esc(ownModel)}" maxlength="200" autocomplete="off" placeholder="${esc(draft.auto_activate.model?`沿用默认：${draft.auto_activate.model}`:'自动选择低消耗模型')}" ${a.disabled?'disabled':''}><datalist id="${esc(listID)}">${models.map(m=>`<option value="${esc(m.id)}">最低思考：${esc(m.lowest_effort||'自动')}</option>`).join('')}</datalist></label><p class="hint">${models.length?`已发现 ${models.length} 个可用模型。`:'可用模型由后台读取。'}留空沿用默认设置，思考程度固定为最低支持档。</p>${!draft.auto_activate.enabled?'<p class="hint">自动激活总开关已关闭；账号设置保留。</p>':''}${r?`<details class="history-detail activation-result"><summary>最近激活 · ${esc(activationLabel(r))} · ${esc(date(r.at))}</summary><p class="meta">${esc(activationDetails(r))}</p>${r.reason?`<p>${esc(r.reason)}</p>`:''}${r.error?`<p class="error">${esc(r.error)}</p>`:''}${r.state==='succeeded'&&r.confirmed!==true?'<p class="hint">模型调用已完成，计时启动状态以后台后续查询为准。</p>':''}</details>`:''}</section>`;
   }
   function renderAccounts() {
     const accounts=state.accounts||[],p=state.policy,query=$('account-search').value.trim(),filter=$('account-filter').value;
@@ -165,13 +166,17 @@
   function renderEvents() {
     const groups=filteredGroups(),activations=filteredActivationGroups();$('event-count').textContent=M.groups(state.reset_events).length+M.activationGroups(state.activation_events).length;
     $('activation-event-count').textContent=M.activationGroups(state.activation_events).length;
-    markup($('activation-events'),activations.map(g=>`<details class="panel activation-operation" data-key="${esc(g.key)}"><summary><div><strong>${esc(g.account)}</strong><span class="meta">${esc(date(g.latest.at))} · ${esc(activationWindows(g.latest))}</span></div><span class="badge ${activationGood(g.latest)?'good':['uncertain','failed','blocked'].includes(g.latest.state)?'warn':''}">${esc(activationLabel(g.latest))}</span></summary><p>${esc(g.latest.reason||'额度刷新后自动激活')}</p><ol class="timeline">${g.events.map(e=>`<li><time>${esc(date(e.at))}</time><strong>${esc(activationLabel(e))}</strong><p class="meta">${esc(activationDetails(e))}</p>${e.reason?`<p>${esc(e.reason)}</p>`:''}${e.error?`<p class="error">${esc(e.error)}</p>`:''}${e.state==='succeeded'&&e.confirmed!==true?'<p class="hint">调用成功；计时启动状态等待额度查询确认。</p>':''}</li>`).join('')}</ol></details>`).join('')||'<div class="panel empty">暂无匹配的自动激活记录。</div>');
+    markup($('activation-events'),activations.map(g=>`<details class="panel activation-operation" data-key="${esc(g.key)}"><summary><div><strong>${esc(g.account)}</strong><span class="meta">${esc(date(g.latest.at))} · ${esc(activationWindows(g.latest))}</span></div><span class="badge ${activationGood(g.latest)?'good':['uncertain','failed','blocked'].includes(g.latest.state)?'warn':''}">${esc(activationLabel(g.latest))}</span></summary><p>${esc(g.latest.reason||'额度自动激活')}</p><ol class="timeline">${g.events.map(e=>`<li><time>${esc(date(e.at))}</time><strong>${esc(activationLabel(e))}</strong><p class="meta">${esc(activationDetails(e))}</p>${e.reason?`<p>${esc(e.reason)}</p>`:''}${e.error?`<p class="error">${esc(e.error)}</p>`:''}${e.state==='succeeded'&&e.confirmed!==true?'<p class="hint">调用成功；计时启动状态等待额度查询确认。</p>':''}</li>`).join('')}</ol></details>`).join('')||'<div class="panel empty">暂无匹配的自动激活记录。</div>');
     markup($('events'),groups.map(g => `<details class="panel operation" data-key="${esc(g.key)}"><summary><div><strong>${esc(g.account)}</strong><span class="meta">${esc(date(g.latest.at))} · ${g.events.length} 条事件</span></div><span class="badge ${['success','confirmed'].includes(g.latest.state)?'good':['mismatch','expired'].includes(g.latest.state)||g.latest.result?.error?'warn':''}">${eventLabels[g.latest.state]||esc(g.latest.state)}</span></summary><p>${esc(g.latest.message)}</p><ol class="timeline">${g.events.map(e => `<li><time>${esc(date(e.at))}</time><strong>${eventLabels[e.state]||esc(e.state)}</strong><p>${esc(e.message)}</p>${e.result?`<p class="meta">${esc(resultText(e.result))}</p>${e.result.error?`<p class="error">${esc(e.result.error)}</p>`:''}`:''}</li>`).join('')}</ol></details>`).join('')||'<div class="panel empty">暂无匹配的执行记录。</div>');
   }
   function renderSettings() {
     document.querySelectorAll('[data-field]').forEach(input => syncInput(input,draft[input.dataset.field]));
     syncInput($('auto-enabled'),draft.auto_reset.enabled);syncInput($('auto-hours'),draft.auto_reset.before_hours);syncInput($('auto-include-new'),draft.auto_reset.include_new_accounts);
-    document.querySelectorAll('[data-activate]').forEach(input=>syncInput(input,draft.auto_activate[input.dataset.activate]));
+    document.querySelectorAll('[data-activate]').forEach(input=>{
+      const value=draft.auto_activate[input.dataset.activate];syncInput(input,Array.isArray(value)?value.join(', '):value);
+    });
+    $('activate-daily-times').setCustomValidity(M.dailyTimesError(draft.auto_activate.daily_times));
+    $('activation-next').textContent=M.validDate(state.next_scheduled_activation)?`已保存策略的下次定时：${beijingDate(state.next_scheduled_activation)}（北京时间）`:'已保存策略暂无定时计划';
     const models=new Map();for(const s of state.accounts||[])for(const model of s.activation?.models||[])if(!models.has(model.id))models.set(model.id,model);
     markup($('activate-model-options'),[...models.values()].map(m=>`<option value="${esc(m.id)}">最低思考：${esc(m.lowest_effort||'自动')}</option>`).join(''));
     const enabledActivations=(state.accounts||[]).filter(s=>!s.account.disabled&&s.activation?.enabled).length;
@@ -198,7 +203,7 @@
   }
   async function save() {
     if(saving||!dirty)return;
-    const invalid=[...document.querySelectorAll('input[type=number]')].find(input => !input.disabled&&!input.checkValidity());
+    const invalid=[...document.querySelectorAll('input[type=number], #activate-daily-times')].find(input => !input.disabled&&!input.checkValidity());
     if(invalid){document.querySelector(`[data-tab="${invalid.closest('.view')?.id||'accounts-view'}"]`)?.click();invalid.closest('details.account,details.advanced')?.setAttribute('open','');invalid.reportValidity();return;}
     saving=true;updateDraftStatus();
     const payload=M.copy(draft);
@@ -218,7 +223,7 @@
   for(const id of ['event-search','event-filter'])$(id).addEventListener(id.endsWith('search')?'input':'change',renderEvents);
   document.querySelectorAll('[data-field]').forEach(input => input.addEventListener(input.type==='number'?'input':'change',() => {if(saving||discarding)return;draft[input.dataset.field]=input.type==='number'?Number(input.value):input.value;edit();}));
   for(const [id,key]of [['auto-enabled','enabled'],['auto-hours','before_hours'],['auto-include-new','include_new_accounts']])$(id).addEventListener(id==='auto-hours'?'input':'change',event => {if(saving||discarding)return;draft.auto_reset[key]=event.target.type==='checkbox'?event.target.checked:Number(event.target.value);edit();});
-  document.querySelectorAll('[data-activate]').forEach(input=>input.addEventListener(input.type==='checkbox'?'change':'input',()=>{if(saving||discarding)return;draft.auto_activate[input.dataset.activate]=input.type==='checkbox'?input.checked:input.value.trim();edit();}));
+  document.querySelectorAll('[data-activate]').forEach(input=>input.addEventListener(input.type==='checkbox'?'change':'input',()=>{if(saving||discarding)return;draft.auto_activate[input.dataset.activate]=input.type==='checkbox'?input.checked:input.dataset.activate==='daily_times'?M.dailyTimes(input.value):input.value.trim();edit();}));
   function accountEdit(event) {
     if(saving||discarding)return;
     const input=event.target,kind=input.dataset.edit,node=input.closest('[data-account-id]');if(!kind||!node)return;
@@ -245,7 +250,7 @@
   $('export-events').onclick=() => {
     // Never export account identifiers, credit IDs or upstream response text.
     const aliases=new Map(),alias=name=>{if(!aliases.has(name))aliases.set(name,`账号 ${aliases.size+1}`);return aliases.get(name);};
-    const records=[...filteredActivationGroups().map(g=>({kind:'activation',account:alias(g.account),events:g.events.map(e=>({at:e.at,state:e.state,windows:e.windows,model:e.model,reasoning:e.reasoning,input_tokens:e.input_tokens,output_tokens:e.output_tokens,confirmed:e.confirmed}))})),...filteredGroups().map(g=>({kind:'reset',account:alias(g.account),events:g.events.map(e=>({at:e.at,state:e.state,management_status:e.result?.management_status,http_status:e.result?.http_status,code:e.result?.code}))}))];
+    const records=[...filteredActivationGroups().map(g=>({kind:'activation',account:alias(g.account),events:g.events.map(e=>({at:e.at,scheduled_at:e.scheduled_at,state:e.state,windows:e.windows,model:e.model,reasoning:e.reasoning,input_tokens:e.input_tokens,output_tokens:e.output_tokens,confirmed:e.confirmed}))})),...filteredGroups().map(g=>({kind:'reset',account:alias(g.account),events:g.events.map(e=>({at:e.at,state:e.state,management_status:e.result?.management_status,http_status:e.result?.http_status,code:e.result?.code}))}))];
     const url=URL.createObjectURL(new Blob([JSON.stringify(records,null,2)],{type:'application/json'})),link=document.createElement('a');link.href=url;link.download='quota-guard-events-redacted.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   };
   window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue='';}});
